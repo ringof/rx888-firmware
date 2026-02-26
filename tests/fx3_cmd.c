@@ -3259,13 +3259,18 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
         return 1;
     }
 
-    /* First session: stream a bit */
-    r = cmd_u32_retry(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: STARTFX3 #1: %s\n", libusb_strerror(r));
+    /* --- Session 1: stream, record dma_count ---
+     * Primed read: queue async bulk TD before STARTFX3 to avoid the
+     * PIB overflow race at 64 MS/s (4x16 KB DMA buffers fill in ~500 us).
+     * Uses _retry variant for the first start after potential inter-scenario
+     * recovery, matching dma_count_monotonic and stop_start_cycle. */
+    int got1 = primed_start_and_read_retry(h, 65536, 2000);
+    if (got1 < 0) {
+        printf("FAIL dma_count_reset: primed start #1: %s\n",
+               libusb_strerror(got1));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
-    bulk_read_some(h, 65536, 2000);
     r = cmd_u32(h, STOPFX3, 0);
     if (r < 0) {
         printf("FAIL dma_count_reset: STOPFX3 #1: %s\n", libusb_strerror(r));
@@ -3279,11 +3284,32 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
     }
     uint32_t count1 = s.dma_count;
 
-    /* Second session: start and stop immediately */
+    /* Bail out before session 2 if session 1 produced no data.
+     * Running another start/stop cycle on an already-broken pipeline
+     * compounds GPIF corruption (Population B, hypothesis H5). */
+    if (count1 == 0) {
+        printf("FAIL dma_count_reset: first session dma_count=0 "
+               "(stream didn't produce data)\n");
+        return 1;
+    }
+
+    /* --- Session 2: restart, minimal read, record dma_count ---
+     * Previous design did STARTFX3 then immediate STOPFX3 with no bulk
+     * read.  With no host TDs queued, the GPIF SM was killed mid-
+     * transition by GpifDisable, leaving internal counters and socket
+     * mappings dirty.  The next GpifLoad inherited this residue,
+     * producing cascading 0x1006 PIB errors (Population B).
+     *
+     * A primed read gives the SM a valid consumer path.  4096 bytes is
+     * enough to prove the SM ran and DMA transferred at least one buffer
+     * while keeping session 2 fast.  The test still verifies whether
+     * dma_count resets across sessions. */
     usleep(200000);
-    r = cmd_u32(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: STARTFX3 #2: %s\n", libusb_strerror(r));
+    int got2 = primed_start_and_read(h, 4096, 2000);
+    if (got2 < 0) {
+        printf("FAIL dma_count_reset: primed start #2: %s\n",
+               libusb_strerror(got2));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
     r = cmd_u32(h, STOPFX3, 0);
@@ -3298,12 +3324,6 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
         return 1;
     }
     uint32_t count2 = s.dma_count;
-
-    if (count1 == 0) {
-        printf("FAIL dma_count_reset: first session dma_count=0 "
-               "(stream didn't produce data)\n");
-        return 1;
-    }
 
     if (count2 < count1) {
         printf("PASS dma_count_reset: count dropped %u->%u after restart\n",
