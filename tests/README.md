@@ -22,7 +22,23 @@ make clean      # removes build artifacts
 ## fx3_cmd -- Vendor Command Exerciser
 
 Sends individual USB vendor requests to an RX888mk2 and reports
-PASS/FAIL.  The device must already have firmware loaded (PID 0x00F1).
+PASS/FAIL.
+
+### Firmware upload
+
+If the device is in bootloader mode (PID 0x00F3), use `-F` to upload
+firmware automatically before running a command:
+
+```
+./fx3_cmd -F ../SDDC_FX3/SDDC_FX3.img test     # upload + probe
+./fx3_cmd -F ../SDDC_FX3/SDDC_FX3.img soak 8   # upload + 8h soak
+./fx3_cmd load ../SDDC_FX3/SDDC_FX3.img         # upload only
+```
+
+The `-F` flag auto-detects: if firmware is already loaded (PID 0x00F1),
+the upload step is skipped.  The `load` command always uploads (resetting
+to bootloader first if needed).  Both use `rx888_stream` from the
+`rx888_tools` submodule.
 
 ### Basic commands
 

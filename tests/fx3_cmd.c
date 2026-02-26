@@ -4,11 +4,11 @@
  * Sends individual USB vendor requests to an RX888mk2 and reports
  * success/failure.  Designed for scripted hardware testing.
  *
- * IMPORTANT: This tool assumes the device already has firmware loaded
- * (PID 0x00F1).  It does NOT handle firmware upload.  Use rx888_stream
- * from https://github.com/ringof/rx888_tools with its -f flag to load
- * firmware onto a freshly powered device first.  The fw_test.sh wrapper
- * script handles this automatically.
+ * By default, this tool assumes the device already has firmware loaded
+ * (PID 0x00F1).  Use -F <firmware.img> to automatically upload firmware
+ * via rx888_stream when the device is in bootloader mode (PID 0x00F3),
+ * or use the "load" command for explicit upload-only.  The fw_test.sh
+ * and soak_test.sh wrapper scripts also handle firmware upload.
  *
  * Build:  gcc -O2 -Wall -o fx3_cmd fx3_cmd.c -lusb-1.0
  * Needs:  libusb-1.0-0-dev
@@ -25,6 +25,8 @@
 #include <signal.h>
 #include <time.h>
 #include <termios.h>
+#include <sys/wait.h>
+#include <limits.h>
 #include <libusb-1.0/libusb.h>
 
 /* ------------------------------------------------------------------ */
@@ -218,6 +220,103 @@ static void close_rx888(libusb_device_handle *h)
         libusb_release_interface(h, 0);
         libusb_close(h);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Firmware upload via rx888_stream (same approach as soak_test.sh)    */
+/* ------------------------------------------------------------------ */
+
+/* Locate the rx888_stream binary.  Search order:
+ *   1. Same directory as fx3_cmd (symlink created by tests/Makefile)
+ *   2. rx888_tools/rx888_stream in the same directory
+ *   3. Fall back to bare name (let exec search PATH)
+ * Returns 1 if a verified path was found, 0 if falling back to PATH. */
+static int find_rx888_stream(char *out, size_t out_size)
+{
+    /* Leave room for longest suffix ("rx888_tools/rx888_stream" = 24) */
+    char self_dir[PATH_MAX - 32];
+    ssize_t len = readlink("/proc/self/exe", self_dir, sizeof(self_dir) - 1);
+    if (len > 0) {
+        self_dir[len] = '\0';
+        char *slash = strrchr(self_dir, '/');
+        if (slash) {
+            *(slash + 1) = '\0';
+
+            snprintf(out, out_size, "%srx888_stream", self_dir);
+            if (access(out, X_OK) == 0)
+                return 1;
+
+            snprintf(out, out_size, "%srx888_tools/rx888_stream", self_dir);
+            if (access(out, X_OK) == 0)
+                return 1;
+        }
+    }
+
+    /* Fall back to PATH */
+    snprintf(out, out_size, "rx888_stream");
+    return 0;
+}
+
+/* Upload firmware to an FX3 device in bootloader mode by forking
+ * rx888_stream.  Mirrors the upload sequence in soak_test.sh:
+ *   1. Fork rx888_stream -f <fw_path> -s 32000000
+ *   2. Wait 4 s for upload + enumeration
+ *   3. Kill rx888_stream (it would otherwise stream forever)
+ *   4. Wait 2 s for USB re-enumeration
+ *   5. Verify device appeared at app PID (0x00F1)
+ * Returns 0 on success, -1 on failure. */
+static int upload_firmware(libusb_context *ctx, const char *fw_path)
+{
+    char stream_bin[PATH_MAX];
+    find_rx888_stream(stream_bin, sizeof(stream_bin));
+
+    if (access(fw_path, R_OK) != 0) {
+        fprintf(stderr, "error: firmware file not readable: %s\n", fw_path);
+        return -1;
+    }
+
+    fprintf(stderr, "uploading firmware: %s\n", fw_path);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child: suppress output, exec rx888_stream */
+        if (!freopen("/dev/null", "w", stdout)) _exit(126);
+        if (!freopen("/dev/null", "w", stderr)) _exit(126);
+        execl(stream_bin, "rx888_stream",
+              "-f", fw_path, "-s", "32000000", (char *)NULL);
+        /* execl only returns on error — try PATH as last resort */
+        execlp("rx888_stream", "rx888_stream",
+               "-f", fw_path, "-s", "32000000", (char *)NULL);
+        _exit(127);
+    }
+
+    /* Parent: wait 4 s for upload, then kill */
+    sleep(4);
+    kill(pid, SIGTERM);
+    int status;
+    waitpid(pid, &status, 0);
+
+    /* Wait for USB re-enumeration */
+    sleep(2);
+
+    /* Verify device appeared at app PID */
+    libusb_device_handle *h =
+        libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
+    if (!h) {
+        fprintf(stderr, "error: device not found at PID 0x%04X "
+                "after firmware upload\n", RX888_PID_APP);
+        return -1;
+    }
+    libusb_close(h);
+
+    fprintf(stderr, "firmware uploaded — device ready at PID 0x%04X\n",
+            RX888_PID_APP);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -4228,9 +4327,14 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s <command> [args...]\n"
+        "Usage: %s [-F firmware.img] <command> [args...]\n"
+        "\n"
+        "Options:\n"
+        "  -F, --firmware <path>        Upload firmware first if device is in\n"
+        "                               bootloader mode (PID 0x00F3)\n"
         "\n"
         "Commands:\n"
+        "  load <firmware.img>          Upload firmware and exit\n"
         "  test                         Read device info (TESTFX3)\n"
         "  gpio <bits>                  Set GPIO word (hex or decimal)\n"
         "  adc <freq_hz>               Set ADC clock frequency (STARTADC)\n"
@@ -4301,6 +4405,21 @@ static unsigned long parse_num(const char *s)
 
 int main(int argc, char **argv)
 {
+    /* ---- Parse -F / --firmware option ---- */
+    const char *firmware_path = NULL;
+    for (int i = 1; i < argc - 1; i++) {
+        if (strcmp(argv[i], "-F") == 0 ||
+            strcmp(argv[i], "--firmware") == 0) {
+            firmware_path = argv[i + 1];
+            /* Remove -F and its argument from argv */
+            int remaining = argc - i - 2;
+            memmove(&argv[i], &argv[i + 2], remaining * sizeof(char *));
+            argc -= 2;
+            argv[argc] = NULL;
+            break;
+        }
+    }
+
     if (argc < 2) {
         usage(argv[0]);
         return 2;
@@ -4315,6 +4434,47 @@ int main(int argc, char **argv)
         return 1;
     }
     g_ctx = ctx;
+
+    /* ---- Handle "load" command (upload-only, no app-mode device needed) ---- */
+    if (strcmp(cmd, "load") == 0) {
+        const char *fw = (argc >= 3) ? argv[2] : firmware_path;
+        if (!fw) {
+            fprintf(stderr, "error: load requires a firmware path\n"
+                            "usage: %s load <firmware.img>\n", argv[0]);
+            libusb_exit(ctx);
+            return 2;
+        }
+        /* If device is already in app mode, reset to bootloader first */
+        libusb_device_handle *app =
+            libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_APP);
+        if (app) {
+            fprintf(stderr, "device in app mode — resetting to bootloader...\n");
+            if (libusb_kernel_driver_active(app, 0) == 1)
+                libusb_detach_kernel_driver(app, 0);
+            libusb_claim_interface(app, 0);
+            cmd_u32(app, RESETFX3, 0);
+            libusb_close(app);
+            sleep(3);
+        }
+        int rc = upload_firmware(ctx, fw);
+        libusb_exit(ctx);
+        return (rc == 0) ? 0 : 1;
+    }
+
+    /* ---- Auto-upload if -F given and device is in bootloader mode ---- */
+    if (firmware_path) {
+        libusb_device_handle *boot =
+            libusb_open_device_with_vid_pid(ctx, RX888_VID, RX888_PID_BOOT);
+        if (boot) {
+            libusb_close(boot);
+            fprintf(stderr, "device in bootloader mode "
+                    "— uploading firmware...\n");
+            if (upload_firmware(ctx, firmware_path) != 0) {
+                libusb_exit(ctx);
+                return 1;
+            }
+        }
+    }
 
     libusb_device_handle *h = open_rx888(ctx);
     if (!h) {
