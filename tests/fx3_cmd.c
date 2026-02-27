@@ -4432,7 +4432,13 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
         cmd_u32(h, GPIOFX3, 0x0800); /* LED_BLUE — clear SHDWN after gpio scenarios */
         usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
-        libusb_clear_halt(h, EP1_IN); /* H1 fix: clear EP1 residue (see ep1_halt_probe) */
+        /* NOTE: do NOT call libusb_clear_halt(EP1_IN) here unconditionally.
+         * The FX3 CLEAR_FEATURE handler calls CyU3PUsbStall(ep,false,true)
+         * which corrupts USB controller state on a non-stalled endpoint
+         * (see USBHandler.c:154-158).  H1 confirmed that only
+         * ep0_stall_recovery leaves EP1 dirty; blanket clear_halt on every
+         * cycle regresses sustained_stream, wedge_recovery, and freq_hop.
+         * Reverted per issue #82 soak evidence. */
 
         /* Health check — retry once on failure.  After a scenario
          * triggers a watchdog recovery, the device may need up to ~2s
