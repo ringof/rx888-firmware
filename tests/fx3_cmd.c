@@ -3364,14 +3364,19 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
 /* T6: dma_count_monotonic — verify dma_completions grows during stream.
  *
  * Uses primed_start_and_read to queue a bulk TD before STARTFX3.
- * At 64 MS/s the 4×16 KB DMA buffers fill in ~500 µs.  The old
- * synchronous approach (cmd_u32(STARTFX3) then bulk_read_some) left
- * a multi-millisecond gap where PIB errors accumulated unchecked;
- * after ~8 loop iterations the overflow occasionally stalled the DMA
- * pipeline, causing dma_count to plateau and the test to fail
- * (observed: step 8, count 23<=23, pib=141).  The primed start
- * eliminates the initial overflow storm so subsequent synchronous
- * reads can keep the pipeline drained. */
+ * At 64 MS/s the 4×16 KB DMA buffers fill in ~500 µs.
+ *
+ * The monitoring loop overlaps bulk reads with GETSTATS polls: an
+ * async bulk TD is kept in flight while the EP0 control transfer
+ * executes, so the host USB controller continuously drains EP1.
+ * This models how a real application works — a dedicated read thread
+ * pulls data while a separate monitoring thread polls diagnostics.
+ *
+ * The previous synchronous design (bulk_read_some then read_stats
+ * sequentially) left a ~1 ms gap per iteration where nobody was
+ * reading EP1.  After ~8 iterations the cumulative PIB overruns
+ * (0x1005) stalled the DMA pipeline, causing dma_count to plateau
+ * (observed: step 7, count 23<=23, 2 failures in 380 soak cycles). */
 static int do_test_dma_count_monotonic(libusb_device_handle *h)
 {
     int r;
@@ -3403,18 +3408,69 @@ static int do_test_dma_count_monotonic(libusb_device_handle *h)
         return 1;
     }
 
+    /* Overlapped monitoring loop: keep an async bulk TD in flight while
+     * polling GETSTATS, so the host never stops draining EP1.
+     *
+     * Each iteration:
+     *   1. Submit async bulk read (TD queued in xHCI ring)
+     *   2. read_stats() via EP0 control transfer (~1 ms)
+     *      — EP1 bulk TD drains data concurrently
+     *   3. Wait for bulk completion
+     *   4. Check dma_count monotonicity */
     uint32_t prev_count = 0;
     uint32_t entry_faults = have_entry ? entry_stats.streaming_faults : 0;
-    for (int i = 0; i < 10; i++) {
-        got = bulk_read_some(h, 32768, 500);
 
+    for (int i = 0; i < 10; i++) {
+        /* 1. Submit async bulk read */
+        uint8_t *buf = malloc(32768);
+        if (!buf) {
+            printf("FAIL dma_count_monotonic: malloc at step %d\n", i);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+        struct libusb_transfer *xfer = libusb_alloc_transfer(0);
+        if (!xfer) {
+            free(buf);
+            printf("FAIL dma_count_monotonic: alloc_transfer at step %d\n", i);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+        struct primed_xfer_state st = { .completed = 0 };
+        libusb_fill_bulk_transfer(xfer, h, EP1_IN, buf, 32768,
+                                  primed_xfer_cb, &st, 500);
+        r = libusb_submit_transfer(xfer);
+        if (r < 0) {
+            libusb_free_transfer(xfer);
+            free(buf);
+            printf("FAIL dma_count_monotonic: submit at step %d: %s\n",
+                   i, libusb_strerror(r));
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+
+        /* 2. Poll GETSTATS while bulk TD drains EP1 concurrently */
         r = read_stats(h, &s);
         if (r < 0) {
+            /* Cancel in-flight TD before bailing */
+            libusb_cancel_transfer(xfer);
+            while (!st.completed)
+                libusb_handle_events_completed(g_ctx, &st.completed);
+            libusb_free_transfer(xfer);
+            free(buf);
             printf("FAIL dma_count_monotonic: GETSTATS step %d: %s\n",
                    i, libusb_strerror(r));
             cmd_u32(h, STOPFX3, 0);
             return 1;
         }
+
+        /* 3. Wait for bulk read to complete */
+        while (!st.completed)
+            libusb_handle_events_completed(g_ctx, &st.completed);
+
+        got = (st.status == LIBUSB_TRANSFER_COMPLETED) ? st.actual_length :
+              (st.status == LIBUSB_TRANSFER_TIMED_OUT)  ? st.actual_length : -1;
+        libusb_free_transfer(xfer);
+        free(buf);
 
         printf("#   dma_monotonic[%d]: read=%d dma=%u gpif=%u pib=%u faults=%u%s\n",
                i, got, s.dma_count, s.gpif_state, s.pib_errors,
