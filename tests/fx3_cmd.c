@@ -1583,9 +1583,18 @@ static int primed_start_and_read(libusb_device_handle *h,
     libusb_free_transfer(xfer);
     free(buf);
 
-    if (st.status == LIBUSB_TRANSFER_COMPLETED ||
-        st.status == LIBUSB_TRANSFER_TIMED_OUT)
+    if (st.status == LIBUSB_TRANSFER_COMPLETED)
         return st.actual_length;
+
+    /* H4 fix: timeout with 0 bytes means the device didn't produce any
+     * data — return LIBUSB_ERROR_TIMEOUT so the retry variant fires its
+     * STOP + clear_halt + retry recovery.  Previously this returned 0,
+     * which looked like "success" (r >= 0) and bypassed recovery entirely.
+     * Timeout with partial data (actual_length > 0) is a valid short
+     * read — return the byte count so callers can use the data. */
+    if (st.status == LIBUSB_TRANSFER_TIMED_OUT)
+        return (st.actual_length > 0) ? st.actual_length
+                                      : LIBUSB_ERROR_TIMEOUT;
 
     /* Map transfer status to a libusb error code */
     switch (st.status) {
