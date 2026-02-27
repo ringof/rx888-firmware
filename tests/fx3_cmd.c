@@ -4432,6 +4432,7 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
         cmd_u32(h, GPIOFX3, 0x0800); /* LED_BLUE — clear SHDWN after gpio scenarios */
         usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
+        libusb_clear_halt(h, EP1_IN); /* H1 fix: clear EP1 residue (see ep1_halt_probe) */
 
         /* Health check — retry once on failure.  After a scenario
          * triggers a watchdog recovery, the device may need up to ~2s
