@@ -526,7 +526,6 @@ static int do_test_ep0_hammer(libusb_device_handle *h);
 static int do_test_debug_cmd_while_stream(libusb_device_handle *h);
 static int do_test_adc_freq_extremes(libusb_device_handle *h);
 static int do_test_data_sanity(libusb_device_handle *h);
-static int do_test_ep1_halt_probe(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -578,7 +577,6 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"debug_cmd_while_stream", do_test_debug_cmd_while_stream},
     {"adc_freq_extremes", do_test_adc_freq_extremes},
     {"data_sanity",      do_test_data_sanity},
-    {"ep1_halt_probe",   do_test_ep1_halt_probe},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -624,7 +622,6 @@ static void print_local_help(void)
            "  debug_cmd_while_stream        Debug command during stream\n"
            "  adc_freq_extremes             Edge ADC frequencies\n"
            "  data_sanity                   Bulk data corruption check\n"
-           "  ep1_halt_probe                H1: EP1-IN halt residue test\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -3987,165 +3984,6 @@ static int do_test_watchdog_race(libusb_device_handle *h, int rounds)
 }
 
 /* ------------------------------------------------------------------ */
-/* H1: EP1-IN halt residue between scenarios                          */
-/*                                                                    */
-/* Hypothesis: after certain predecessor scenarios, EP1-IN is left in */
-/* a HALT or xHCI-desync state that the inter-scenario cleanup        */
-/* (STOPFX3 + 100ms) doesn't clear.  The soak health check only      */
-/* probes EP0, so EP1 issues go undetected.  The next streaming       */
-/* scenario's primed_start_and_read returns 0 bytes on timeout (not   */
-/* an error code), so the retry logic with clear_halt never fires.    */
-/*                                                                    */
-/* Test design: for each predecessor scenario from the soak failure   */
-/* log, run the predecessor, apply soak-identical cleanup, then test  */
-/* streaming in two arms:                                             */
-/*   Arm A: no clear_halt  → primed start+read                       */
-/*   Arm B: clear_halt(EP1) → primed start+read                      */
-/* Compare bytes received.  If Arm A=0 and Arm B>0, H1 is supported. */
-/* ------------------------------------------------------------------ */
-
-/* Predecessor runner: execute one predecessor, return 0 on success */
-typedef int (*predecessor_fn)(libusb_device_handle *);
-
-struct h1_predecessor {
-    const char *name;
-    predecessor_fn func;
-};
-
-/* One arm of the H1 test: cleanup → optional clear_halt → stream.
- * Returns bytes from primed read (0 = no data, <0 = error).
- * ep1_probe_out receives the EP1 probe result if non-NULL. */
-static int h1_arm(libusb_device_handle *h, int do_clear_halt,
-                  int *ep1_probe_out)
-{
-    /* Soak-identical inter-scenario cleanup */
-    cmd_u32(h, STOPFX3, 0);          /* ignore errors — may already be stopped */
-    cmd_u32(h, GPIOFX3, 0x0800);     /* LED_BLUE — clear SHDWN */
-    usleep(100000);                   /* 100 ms — let GPIF/DMA quiesce */
-
-    /* Probe EP1-IN: a short bulk read on a non-streaming device.
-     * HALT → LIBUSB_ERROR_PIPE; clean → LIBUSB_ERROR_TIMEOUT;
-     * xHCI desync → LIBUSB_ERROR_TIMEOUT or LIBUSB_ERROR_IO. */
-    uint8_t probe_buf[512];
-    int transferred = 0;
-    int probe_r = libusb_bulk_transfer(h, EP1_IN, probe_buf,
-                                       sizeof(probe_buf), &transferred, 10);
-    if (ep1_probe_out)
-        *ep1_probe_out = probe_r;
-
-    if (do_clear_halt)
-        libusb_clear_halt(h, EP1_IN);
-
-    /* Set ADC and attempt streaming */
-    int r = cmd_u32(h, STARTADC, 64000000);
-    if (r < 0) return r;
-
-    int got = primed_start_and_read(h, 16384, 2000);
-
-    cmd_u32(h, STOPFX3, 0);
-    return got;
-}
-
-static const char *probe_str(int r)
-{
-    if (r == LIBUSB_ERROR_PIPE)    return "HALT";
-    if (r == LIBUSB_ERROR_TIMEOUT) return "timeout";
-    if (r == LIBUSB_ERROR_IO)      return "IO";
-    if (r == 0)                    return "data(!)";
-    return "other";
-}
-
-static void h1_print_arm(const char *label, int probe, int got,
-                          struct fx3_stats *s)
-{
-    printf("  %s: probe=%-7s stream=", label, probe_str(probe));
-    if (got > 0)
-        printf("%d bytes", got);
-    else if (got == 0)
-        printf("0 bytes (timeout)");
-    else
-        printf("error(%s)", libusb_strerror(got));
-    printf("\n");
-    printf("    gpif=%u dma=%u pib=%u pib_arg=0x%04X faults=%u si5351=0x%02X\n",
-           s->gpif_state, s->dma_count, s->pib_errors,
-           s->last_pib_arg, s->streaming_faults, s->si5351_status);
-}
-
-static int do_test_ep1_halt_probe(libusb_device_handle *h)
-{
-    /* Predecessor scenarios observed before soak failures.
-     * These are the same functions used by the soak harness. */
-    const struct h1_predecessor preds[] = {
-        {"ep0_stall_recovery",  do_test_ep0_stall_recovery},
-        {"double_stop",         do_test_double_stop},
-        {"debug_while_stream",  do_test_debug_while_streaming},
-        {"gpio_during_stream",  do_test_gpio_during_stream},
-    };
-    int npreds = (int)(sizeof(preds) / sizeof(preds[0]));
-
-    int any_evidence = 0;
-    int total_arm_a_ok = 0, total_arm_b_ok = 0;
-
-    for (int i = 0; i < npreds; i++) {
-        printf("--- H1 probe: predecessor=%s ---\n", preds[i].name);
-
-        /* === Arm A: predecessor → cleanup → stream (no clear_halt) === */
-        preds[i].func(h);   /* run predecessor (ignore pass/fail) */
-
-        int probe_a = 0;
-        int got_a = h1_arm(h, 0 /*no clear_halt*/, &probe_a);
-        struct fx3_stats stats_a = {0};
-        read_stats(h, &stats_a);
-
-        /* === Arm B: predecessor → cleanup → clear_halt → stream === */
-        preds[i].func(h);   /* re-run predecessor */
-
-        int probe_b = 0;
-        int got_b = h1_arm(h, 1 /*clear_halt*/, &probe_b);
-        struct fx3_stats stats_b = {0};
-        read_stats(h, &stats_b);
-
-        /* Report */
-        h1_print_arm("Arm A (no clear_halt)", probe_a, got_a, &stats_a);
-        h1_print_arm("Arm B (clear_halt)   ", probe_b, got_b, &stats_b);
-
-        if (got_a > 0) total_arm_a_ok++;
-        if (got_b > 0) total_arm_b_ok++;
-
-        if (got_a <= 0 && got_b > 0) {
-            printf("  >>> H1 SUPPORTED: clear_halt fixed streaming after %s\n",
-                   preds[i].name);
-            any_evidence++;
-        } else if (got_a <= 0 && got_b <= 0) {
-            printf("  >>> BOTH ARMS FAILED: issue is not EP1 halt\n");
-        } else if (got_a > 0 && got_b > 0) {
-            printf("  >>> BOTH ARMS OK: no EP1 residue from %s\n",
-                   preds[i].name);
-        } else {
-            printf("  >>> CLEAR_HALT MADE IT WORSE (Arm A=%d, Arm B=%d)\n",
-                   got_a, got_b);
-        }
-        printf("\n");
-    }
-
-    printf("=== H1 SUMMARY: Arm A OK=%d/%d  Arm B OK=%d/%d  evidence=%d ===\n",
-           total_arm_a_ok, npreds, total_arm_b_ok, npreds, any_evidence);
-
-    if (any_evidence > 0) {
-        printf("RESULT ep1_halt_probe: H1 SUPPORTED — clear_halt fixed "
-               "%d/%d predecessors\n", any_evidence, npreds);
-    } else if (total_arm_a_ok == npreds) {
-        printf("RESULT ep1_halt_probe: H1 NOT TESTABLE — all arms passed "
-               "(no failure reproduced)\n");
-    } else {
-        printf("RESULT ep1_halt_probe: H1 REFUTED — clear_halt did not "
-               "fix streaming failures\n");
-    }
-
-    return 0;  /* always "pass" — this is diagnostic */
-}
-
-/* ------------------------------------------------------------------ */
 /* Soak test harness                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -4841,9 +4679,6 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "data_sanity") == 0) {
         rc = do_test_data_sanity(h);
-
-    } else if (strcmp(cmd, "ep1_halt_probe") == 0) {
-        rc = do_test_ep1_halt_probe(h);
 
     } else if (strcmp(cmd, "watchdog_stress") == 0) {
         int secs = (argc >= 3) ? (int)parse_num(argv[2]) : 120;
