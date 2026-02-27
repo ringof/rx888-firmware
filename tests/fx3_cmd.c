@@ -2187,14 +2187,21 @@ static int do_test_sustained_stream(libusb_device_handle *h)
         printf("FAIL sustained_stream: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32_retry(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL sustained_stream: STARTFX3: %s\n", libusb_strerror(r));
+
+    /* Primed start: queue async bulk TD before STARTFX3, matching every
+     * other soak streaming scenario.  The retry variant recovers dirty
+     * xHCI endpoint state left by preceding scenarios (e.g. pib_overflow)
+     * via STOP + clear_halt between attempts. */
+    int primed = primed_start_and_read_retry(h, 65536, 2000);
+    if (primed < 0) {
+        printf("FAIL sustained_stream: primed start: %s\n",
+               libusb_strerror(primed));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
 
-    /* Read continuously for duration_sec */
-    uint64_t total_bytes = 0;
+    /* Stream is running — continue reading synchronously */
+    uint64_t total_bytes = (uint64_t)primed;
     int chunk = 65536;
     uint8_t *buf = malloc(chunk);
     if (!buf) {
@@ -3280,18 +3287,23 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
         cmd_u32(h, STOPFX3, 0);
         return 1;
     }
+
+    /* Read GETSTATS *before* STOPFX3 — the STOPFX3 handler resets
+     * glDMACount to 0 (USBHandler.c:386), so reading after STOP
+     * always returns dma_count=0 regardless of actual throughput. */
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: GETSTATS #1: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+    uint32_t count1 = s.dma_count;
+
     r = cmd_u32(h, STOPFX3, 0);
     if (r < 0) {
         printf("FAIL dma_count_reset: STOPFX3 #1: %s\n", libusb_strerror(r));
         return 1;
     }
-
-    r = read_stats(h, &s);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: GETSTATS #1: %s\n", libusb_strerror(r));
-        return 1;
-    }
-    uint32_t count1 = s.dma_count;
 
     /* Bail out before session 2 if session 1 produced no data.
      * Running another start/stop cycle on an already-broken pipeline
@@ -3321,18 +3333,21 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
         cmd_u32(h, STOPFX3, 0);
         return 1;
     }
+
+    /* Read GETSTATS before STOPFX3 (same reason as session 1). */
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: GETSTATS #2: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+    uint32_t count2 = s.dma_count;
+
     r = cmd_u32(h, STOPFX3, 0);
     if (r < 0) {
         printf("FAIL dma_count_reset: STOPFX3 #2: %s\n", libusb_strerror(r));
         return 1;
     }
-
-    r = read_stats(h, &s);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: GETSTATS #2: %s\n", libusb_strerror(r));
-        return 1;
-    }
-    uint32_t count2 = s.dma_count;
 
     if (count2 < count1) {
         printf("PASS dma_count_reset: count dropped %u->%u after restart\n",
