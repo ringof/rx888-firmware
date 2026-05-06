@@ -206,19 +206,34 @@ implemented.  They are documented here as design notes for reference.
 These require changes to the GPIF state machine (via GPIF II Designer)
 and are more invasive than the polling approaches above.
 
-#### 6. GPIF state machine redesign (advanced)
+#### 6. GPIF state machine redesign — add `!FW_TRG` exit transitions
 
-The GPIF II Designer tool could be used to modify the state machine to:
+**Status: actively planned — see `PLAN-gpif-clean-stop.md`.**
 
-- Add a **timeout transition** from BUSY/WAIT states back to IDLE
-  using a counter limit, so the SM self-recovers instead of waiting
-  forever
-- Fire `INTR_CPU` (beta output bit 18) when entering a BUSY state,
-  giving sub-microsecond detection latency via
-  `CyU3PGpifRegisterSMIntrCallback()`
+The current SM has a critical asymmetry: only the TH1_RD state (6)
+has a `!FW_TRG → IDLE` transition, meaning the SM can only cleanly
+stop when it happens to be in that one state.  If the SM is in
+TH0_RD, TH0_WAIT, or TH1_WAIT when `FW_TRG` is de-asserted, there
+is no clean exit path.  This forces every STOPFX3 and watchdog
+recovery to use `CyU3PGpifDisable(CyTrue)` (force-stop), which kills
+the SM mid-transaction and can corrupt DMA state.
 
-This would require regenerating `SDDC_GPIF.h` and careful validation
-of the new state machine timing.
+The planned fix adds `!FW_TRG → IDLE` transitions to three states
+that each have exactly one free transition slot:
+
+| State | Current transitions | Add |
+|-------|-------------------|-----|
+| TH0_RD (2) | `DATA_CNT_HIT → TH1_RD_LD` | `!FW_TRG → IDLE` |
+| TH0_WAIT (9) | `DMA_RDY_TH0 → TH0_RD_LD` | `!FW_TRG → IDLE` |
+| TH1_WAIT (8) | `DMA_RDY_TH1 → TH1_RD_LD` | `!FW_TRG → IDLE` |
+
+With these transitions, de-asserting `FW_TRG` guarantees the SM
+reaches IDLE within 3 clock cycles (~47 ns at 64 MHz) from any
+active state.  This enables `CyU3PGpifDisable(CyFalse)` (soft-stop)
+for clean shutdown.
+
+This requires regenerating `SDDC_GPIF.h` via GPIF II Designer and
+validation against the hardware.
 
 ---
 
@@ -249,12 +264,16 @@ Every 100 ms (while glIsApplnActive):
   │       │
   │       └─ If stall counter reaches 3 (300 ms stuck) →
   │           │
-  │           ├─ 1. CyU3PGpifControlSWInput(CyFalse)   // de-assert FW_TRG
-  │           ├─ 2. CyU3PGpifDisable(CyFalse)          // disable SM
-  │           ├─ 3. CyU3PDmaMultiChannelReset()         // flush DMA
-  │           ├─ 4. CyU3PUsbFlushEp(CY_FX_EP_CONSUMER) // flush EP1
+  │           ├─ Check recovery cap (glWdgRecoveryCount < glWdgMaxRecovery)
+  │           │   └─ If cap exceeded → log "recovery limit", clear stall counter, wait
   │           │
-  │           ├─ 5. Check Si5351 PLL lock
+  │           ├─ 1. Increment glWdgRecoveryCount
+  │           ├─ 2. CyU3PGpifControlSWInput(CyFalse)   // de-assert FW_TRG
+  │           ├─ 3. CyU3PGpifDisable(CyTrue)           // force-stop SM
+  │           ├─ 4. CyU3PDmaMultiChannelReset()         // flush DMA
+  │           ├─ 5. CyU3PUsbFlushEp(CY_FX_EP_CONSUMER) // flush EP1
+  │           │
+  │           ├─ 6. Check Si5351 PLL lock
   │           │   │
   │           │   ├─ PLL locked → auto-restart:
   │           │   │   ├─ DmaMultiChannelSetXfer (re-arm DMA)
@@ -264,9 +283,9 @@ Every 100 ms (while glIsApplnActive):
   │           │   └─ PLL unlocked → wait for host:
   │           │       └─ (host must send STARTADC + STARTFX3)
   │           │
-  │           ├─ 6. Increment glCounter[2] (watchdog recovery count)
-  │           ├─ 7. Reset stall counter and DMA count
-  │           └─ 8. Log "WDG: === RECOVERY DONE (total=N) ==="
+  │           ├─ 7. Increment glCounter[2] (watchdog recovery count)
+  │           ├─ 8. Reset stall counter and DMA count
+  │           └─ 9. Log "WDG: === RECOVERY DONE/WAIT ==="
 ```
 
 ### Pre-flight check (`StartStopApplication.c:89-100`)
@@ -308,13 +327,15 @@ The host is informed of watchdog recovery events through:
 | Priority | Change | Status | Detection latency |
 |----------|--------|--------|-------------------|
 | **1** | PIB error callback: log + post event to app thread | **Done** (`StartStopApplication.c:41-49,167`) | ~ms (interrupt-driven) |
-| **2** | `glDMACount` delta check in watchdog | **Done** (`RunApplication.c:226`) | 100-300 ms (polling) |
+| **2** | `glDMACount` delta check in watchdog | **Done** (`RunApplication.c:221`) | 100-300 ms (polling) |
 | **3** | Si5351 PLL lock check before STARTFX3 (preflight) | **Done** (`StartStopApplication.c:89-100`) | N/A (pre-flight) |
-| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | **Done** (`RunApplication.c:229-232`) | 100-300 ms (polling) |
-| **5** | Si5351 PLL lock check during recovery | **Done** (`RunApplication.c:253`) | 300 ms (after 3 stall polls) |
-| **6** | Redesign GPIF state machine with timeout transitions | Not started | <1 us (hardware) |
+| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | **Done** (`RunApplication.c:226-228`) | 100-300 ms (polling) |
+| **5** | Si5351 PLL lock check during recovery | **Done** (`RunApplication.c:262`) | 300 ms (after 3 stall polls) |
+| **5b** | Watchdog recovery cap (`glWdgMaxRecovery`) | **Done** (`RunApplication.c:235-240`) | N/A (limit, not detection) |
+| **6** | Add `!FW_TRG → IDLE` transitions to GPIF SM | **Planned** (`PLAN-gpif-clean-stop.md`) | <1 clock (~16 ns) |
 
 Priorities 1-5 are implemented.  The silent wedge is now a
-detected-and-recovered condition.  Priority 6 (GPIF SM redesign) would
-provide sub-microsecond detection but requires regenerating
-`SDDC_GPIF.h` via GPIF II Designer and is not yet planned.
+detected-and-recovered condition.  Priority 6 (adding `!FW_TRG`
+clean-stop transitions) is actively planned and would enable reliable
+soft-stop via `CyU3PGpifDisable(CyFalse)`.  See
+`PLAN-gpif-clean-stop.md` for the full transition analysis.

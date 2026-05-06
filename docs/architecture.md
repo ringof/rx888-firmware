@@ -216,6 +216,21 @@ but initiated automatically.  If the PLL has lost lock, the watchdog
 leaves the pipeline stopped and waits for the host to reconfigure.
 Each recovery increments `glCounter[2]` (visible via `GETSTATS`).
 
+A per-session **recovery cap** (`glWdgMaxRecovery`, default 5) limits
+the number of consecutive watchdog recoveries before the watchdog
+stops retrying and waits for an explicit `STARTFX3` from the host.
+The cap counter (`glWdgRecoveryCount`) resets to zero whenever DMA
+resumes normally, and also on `STARTFX3` and `STOPFX3`.
+
+**Known limitation -- force-stop only:** Both STOPFX3 and the watchdog
+currently use `CyU3PGpifDisable(CyTrue)` (force-stop), which kills
+the SM mid-transaction.  The GPIF state machine's WAIT states
+(TH0_WAIT, TH1_WAIT) lack `!FW_TRG` exit transitions, so a clean
+soft-stop (`CyFalse`) cannot be guaranteed to complete.  A planned
+state machine change (see `PLAN-gpif-clean-stop.md`) adds `!FW_TRG →
+IDLE` transitions to the WAIT and TH0_RD states, which would enable
+reliable soft-stop.
+
 ---
 
 ## DMA architecture
@@ -803,19 +818,19 @@ every vendor command through `fx3_cmd`.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `SDDC_FX3/StartUp.c` | 82 | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | 262 | Application thread, hardware detection, main loop |
-| `SDDC_FX3/USBHandler.c` | 449 | USB setup callback (all vendor commands), USB init |
-| `SDDC_FX3/StartStopApplication.c` | 163 | GPIF/DMA/endpoint configuration, start/stop streaming |
-| `SDDC_FX3/DebugConsole.c` | 341 | UART init, debug buffer, console parser, USB debug |
+| `SDDC_FX3/RunApplication.c` | 349 | Application thread, hardware detection, main loop, GPIF watchdog |
+| `SDDC_FX3/USBHandler.c` | 554 | USB setup callback (all vendor commands), USB init |
+| `SDDC_FX3/StartStopApplication.c` | 212 | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
+| `SDDC_FX3/DebugConsole.c` | 349 | UART init, debug buffer, console parser, USB debug |
 | `SDDC_FX3/USBDescriptor.c` | 299 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
 | `SDDC_FX3/Support.c` | 185 | Error code lookup, status checking, error LED blink |
 | `SDDC_FX3/i2cmodule.c` | 90 | I2C master init and transfer functions |
-| `SDDC_FX3/driver/Si5351.c` | 283 | Si5351 clock synthesizer: PLL setup, frequency calculation |
-| `SDDC_FX3/radio/rx888r2.c` | 88 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
-| `SDDC_FX3/Application.h` | 94 | Central header: includes, defines, prototypes |
-| `SDDC_FX3/protocol.h` | 81 | USB protocol: vendor request codes, GPIO enums, arguments |
+| `SDDC_FX3/driver/Si5351.c` | 328 | Si5351 clock synthesizer: PLL setup, frequency calculation, lock status |
+| `SDDC_FX3/radio/rx888r2.c` | 89 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
+| `SDDC_FX3/Application.h` | 96 | Central header: includes, defines, prototypes |
+| `SDDC_FX3/protocol.h` | 84 | USB protocol: vendor request codes, GPIO enums, arguments |
 | `SDDC_FX3/SDDC_GPIF.h` | 173 | Generated GPIF II state machine configuration |
 | `SDDC_FX3/cyfxtx.c` | -- | Cypress SDK memory and TX runtime support |
 | `SDDC_FX3/cyfx_gcc_startup.S` | -- | ARM GCC startup assembly (vectors, stack init) |
-| `tests/fx3_cmd.c` | 1104 | Host-side vendor command exerciser and test harness (libusb) |
-| `tests/fw_test.sh` | 539 | TAP test harness for automated firmware testing |
+| `tests/fx3_cmd.c` | 4714 | Host-side vendor command exerciser, soak test harness (libusb) |
+| `tests/fw_test.sh` | 701 | TAP test harness for automated firmware testing (36 tests + 3 streaming) |
