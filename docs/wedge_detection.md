@@ -36,18 +36,18 @@ read at the internal clock rate."
 The deadlock occurs as a **secondary failure** when the data path backs
 up:
 
-```
-Clock loss
-  → ADC outputs freeze
-  → GPIF reads garbage at full rate
-  → Host detects bad data (or crashes, or stops reading)
-  → USB bulk endpoint NAKs (host not submitting transfers)
-  → DMA buffers fill, none are drained
-  → GPIF threads enter BUSY/WAIT states (states 5, 7, 8, 9)
-  → State machine stalls indefinitely
-  → glIsApplnActive remains true
-  → Firmware sits idle, no timeout, no recovery
-  → Device is wedged until physical disconnect
+```mermaid
+graph TD
+    A[Clock loss] --> B[ADC outputs freeze]
+    B --> C[GPIF reads garbage at full rate]
+    C --> D["Host detects bad data<br/>(or crashes, or stops reading)"]
+    D --> E["USB bulk endpoint NAKs<br/>(host not submitting transfers)"]
+    E --> F[DMA buffers fill, none drained]
+    F --> G["GPIF enters BUSY/WAIT<br/>(states 5, 7, 8, 9)"]
+    G --> H[State machine stalls indefinitely]
+    H --> I[glIsApplnActive remains true]
+    I --> J[Firmware idle — no timeout, no recovery]
+    J --> K[Device wedged until disconnect]
 ```
 
 The firmware now implements a watchdog and preflight check to break
@@ -244,48 +244,32 @@ validation against the hardware.
 The application thread runs a watchdog inside the existing 100 ms
 polling loop.  The detection and recovery sequence is:
 
-```
-Every 100 ms (while glIsApplnActive):
-  │
-  ├─ Compare glDMACount to previous value
-  │   │
-  │   ├─ Count advanced → DMA is healthy
-  │   │   └─ Clear stall counter, update previous count
-  │   │
-  │   └─ Count stalled (== prev, and prev > 0) →
-  │       │
-  │       ├─ Read GPIF SM state
-  │       │   │
-  │       │   ├─ State is 5, 7, 8, or 9 (BUSY/WAIT) →
-  │       │   │   └─ Increment stall counter (log "WDG: stall N/3")
-  │       │   │
-  │       │   └─ State is anything else →
-  │       │       └─ Clear stall counter (transient)
-  │       │
-  │       └─ If stall counter reaches 3 (300 ms stuck) →
-  │           │
-  │           ├─ Check recovery cap (glWdgRecoveryCount < glWdgMaxRecovery)
-  │           │   └─ If cap exceeded → log "recovery limit", clear stall counter, wait
-  │           │
-  │           ├─ 1. Increment glWdgRecoveryCount
-  │           ├─ 2. CyU3PGpifControlSWInput(CyFalse)   // de-assert FW_TRG
-  │           ├─ 3. CyU3PGpifDisable(CyTrue)           // force-stop SM
-  │           ├─ 4. CyU3PDmaMultiChannelReset()         // flush DMA
-  │           ├─ 5. CyU3PUsbFlushEp(CY_FX_EP_CONSUMER) // flush EP1
-  │           │
-  │           ├─ 6. Check Si5351 PLL lock
-  │           │   │
-  │           │   ├─ PLL locked → auto-restart:
-  │           │   │   ├─ DmaMultiChannelSetXfer (re-arm DMA)
-  │           │   │   ├─ GpifSMStart (restart SM in IDLE)
-  │           │   │   └─ GpifControlSWInput(CyTrue)  // assert FW_TRG
-  │           │   │
-  │           │   └─ PLL unlocked → wait for host:
-  │           │       └─ (host must send STARTADC + STARTFX3)
-  │           │
-  │           ├─ 7. Increment glCounter[2] (watchdog recovery count)
-  │           ├─ 8. Reset stall counter and DMA count
-  │           └─ 9. Log "WDG: === RECOVERY DONE/WAIT ==="
+```mermaid
+graph TD
+    POLL["Every 100 ms<br/>(while glIsApplnActive)"] --> CMP{glDMACount<br/>advanced?}
+
+    CMP -->|Yes| HEALTHY[Clear stall counter<br/>Update previous count<br/>Reset glWdgRecoveryCount]
+
+    CMP -->|"No (== prev, prev > 0)"| SM{GPIF SM state?}
+
+    SM -->|"BUSY/WAIT<br/>(5, 7, 8, 9)"| INC["Increment stall counter<br/>log WDG: stall N/3"]
+    SM -->|Other state| CLR[Clear stall counter<br/>— transient]
+
+    INC --> HIT{stall count<br/>reached 3?}
+    HIT -->|No| POLL
+
+    HIT -->|Yes| CAP{Recovery cap<br/>exceeded?}
+    CAP -->|Yes| CAPLIM["Log recovery limit<br/>Clear stall counter<br/>Wait for STARTFX3"]
+
+    CAP -->|No| TEAR["1. Increment glWdgRecoveryCount<br/>2. De-assert FW_TRG<br/>3. CyU3PGpifDisable — CyTrue<br/>4. DMA reset<br/>5. Flush EP1"]
+
+    TEAR --> PLL{Si5351 PLL A<br/>locked?}
+
+    PLL -->|Locked| RESTART["Auto-restart:<br/>DmaMultiChannelSetXfer<br/>GpifSMStart<br/>Assert FW_TRG"]
+    PLL -->|Unlocked| WAIT["Wait for host<br/>(STARTADC + STARTFX3)"]
+
+    RESTART --> DONE["Increment glCounter 2<br/>Reset stall counter + DMA count<br/>Log RECOVERY DONE"]
+    WAIT --> DONE2["Increment glCounter 2<br/>Reset stall counter + DMA count<br/>Log RECOVERY WAIT"]
 ```
 
 ### Pre-flight check (`StartStopApplication.c:89-100`)
