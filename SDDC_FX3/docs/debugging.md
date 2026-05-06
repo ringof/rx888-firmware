@@ -252,6 +252,16 @@ that detects and recovers from DMA stalls caused by host-side
 backpressure.  All watchdog activity is logged to the debug console
 with a `WDG:` prefix.
 
+### Recovery Cap
+
+A per-session recovery cap (`glWdgMaxRecovery`, default
+`WDG_MAX_RECOVERY_DEFAULT` = 5) limits how many consecutive watchdog
+recoveries are attempted before the watchdog gives up and waits for
+an explicit `STARTFX3` from the host.  The cap counter
+(`glWdgRecoveryCount`) resets to zero whenever DMA resumes normally
+(i.e., the stall was transient), and also resets on `STARTFX3` and
+`STOPFX3` (new streaming session).
+
 ### Detection
 
 Every 100 ms the main loop compares `glDMACount` to its previous value.
@@ -275,14 +285,11 @@ WDG: stall cleared SM=2 (was 1/3)
 
 ### Recovery (after 3 consecutive stalls = 300 ms)
 
-When the stall counter reaches 3, the watchdog tears down and rebuilds
-the streaming pipeline:
+When the stall counter reaches 3 (and the recovery cap has not been
+exceeded), the watchdog tears down and rebuilds the streaming pipeline:
 
 ```
-WDG: === RECOVERY START ===
-WDG: GpifDisable done
-WDG: DmaReset rc=0
-WDG: FlushEp rc=0
+WDG: === RECOVERY START === SM=5 DMA=48210 recov=1/5
 ```
 
 It then checks if the Si5351 PLL A is still locked:
@@ -291,27 +298,23 @@ It then checks if the Si5351 PLL A is still locked:
   assert FW_TRG).
 
   ```
-  WDG: PLL_A locked, auto-restart
-  WDG: SetXfer rc=0
-  WDG: SMStart rc=0
-  WDG: === RECOVERY DONE (total=1) ===
+  WDG: === RECOVERY DONE === rst=0 flush=0 xfer=0 sm=0
   ```
 
 - **PLL unlocked:** leaves the pipeline torn down and waits for the
   host to reconfigure the clock and send `STARTFX3`.
 
   ```
-  WDG: PLL_A UNLOCKED, waiting for host
-  WDG: === RECOVERY DONE (total=1) ===
+  WDG: === RECOVERY WAIT === rst=0 flush=0 xfer=0 sm=0
   ```
 
 ### Counter
 
 Each recovery increments `glCounter[2]`, readable via `GETSTATS`
-at offset 15--18.  This counter shares the slot formerly used for EP
-underrun events -- both indicate streaming faults.  The counter resets
-to zero on USB re-enumeration (`StartApplication`), not on
-`STOPFX3`/`STARTFX3`.
+at offset 15--18.  This counter is also incremented by EP underrun
+events in `USBHandler.c` -- both indicate streaming faults.  The
+counter resets to zero on USB re-enumeration (`StartApplication`),
+not on `STOPFX3`/`STARTFX3`.
 
 ### Observing the watchdog
 
@@ -487,6 +490,7 @@ prints `PASS`/`FAIL` and exits 0/1.
 | `fx3_cmd stop_start_cycle` | Cycle STOP+START 5 times, verify bulk data flows each cycle | -- |
 | `fx3_cmd pll_preflight` | Verify STARTFX3 is rejected (STALL) when ADC clock is off | -- |
 | `fx3_cmd wedge_recovery` | Provoke DMA backpressure wedge, verify STOP+START recovers data flow | -- |
+| `fx3_cmd soak [N [seed]]` | Randomized stress test: N cycles (default 100) of random scenarios with health checks | -- |
 | `fx3_cmd reset` | Reboot FX3 to bootloader | -- |
 
 ### 7.2 `fw_test.sh` -- Automated TAP Test Suite
@@ -496,7 +500,7 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
-Runs 30 tests (33 with streaming) in TAP format:
+Runs 36 tests (39 with streaming) in TAP format:
 
 | # | Test | What it verifies |
 |---|------|-----------------|
@@ -524,9 +528,15 @@ Runs 30 tests (33 with streaming) in TAP format:
 | 26 | Stop/start cycle | 5 STOP+START cycles with bulk read each -- detects GPIF wedge |
 | 27 | PLL preflight | STARTFX3 rejected (STALL) when ADC clock is off |
 | 28 | Wedge recovery | DMA backpressure wedge, then STOP+START recovers data flow |
-| 29 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
-| 30 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
-| 31--33 | Streaming (optional) | Data capture, byte count, non-zero data |
+| 29 | Vendor request counter wrap | `glVendorRqtCnt` wraps at 256 |
+| 30 | Stale vendor codes | Dead-zone bRequest values produce STALL |
+| 31 | SETARGFX3 gap indices | Near-miss wIndex values survive |
+| 32 | GPIO extremes | All-zeros and all-ones GPIO patterns survive |
+| 33 | I2C write NACK | Write to absent I2C address correctly fails |
+| 34 | HW smoke test | ADC produces data after GPIO extremes |
+| 35 | PIB overflow | GPIF overflow produces "PIB error" in debug output (issue #10) |
+| 36 | GETSTATS PIB counter | PIB error count > 0 after overflow (issue #10) |
+| 37--39 | Streaming (optional) | Data capture, byte count, non-zero data |
 
 Options:
 
@@ -549,9 +559,9 @@ Options:
 | `Support.c` | `CheckStatus()` / `CheckStatusSilent()` -- error logging with LED blink on failure |
 | `protocol.h` | `_DEBUG_USB_` / `MAXLEN_D_USB` compile-time selection, `READINFODEBUG` command code |
 | `Application.h` | `DebugPrint` macro routing (`DebugPrint2USB` vs `CyU3PDebugPrint`), `TRACESERIAL` define |
-| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, GPIF watchdog recovery |
-| `tests/fx3_cmd.c` | Host-side vendor command tool with interactive debug console |
-| `tests/fw_test.sh` | Automated TAP test suite |
+| `RunApplication.c` | `ApplicationThread` main loop, `MsgParsing()` event dispatch, `ParseCommand()` console handler, GPIF watchdog recovery with recovery cap |
+| `tests/fx3_cmd.c` | Host-side vendor command tool, interactive debug console, soak test harness |
+| `tests/fw_test.sh` | Automated TAP test suite (36 tests + 3 streaming) |
 
 ---
 

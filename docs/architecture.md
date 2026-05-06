@@ -28,24 +28,24 @@ scientific measurement, and general RF experimentation.
 
 ### Block diagram
 
-```
-                                                ┌──────────────┐
-  HF Antenna ──►┌──────────┐   ┌──────────┐    │              │    USB 3.0
-                │ PE4304   │──►│ AD8370   │──►──┤  LTC2208     ├──[ 16-bit ]──►┌──────────┐
-                │ Step Att │   │ VGA      │    ▲│  16-bit ADC  │               │ CYUSB3014│    USB cable
-                │ (6-bit)  │   │ (8-bit)  │    ││              │    GPIF II    │ EZ-USB   ├──────────►  Host PC
-                └──────────┘   └──────────┘    │└──────────────┘   (16-bit     │ FX3      │
-                                               │                    parallel)  └────┬─────┘
-                  BIAS_HF ──► JFET LNA ────────┘                                   │
-                                                                                    │ I2C
-                                                                              ┌─────┴─────┐
-  VHF Antenna ─► ┌────────┐    ┌────────┐                                    │  Si5351A  │
-                 │ R828D  │───►│(to ADC)│                                    │  Clock    │
-                 │ Tuner  │    └────────┘                                    │  Synth    │
-                 └────────┘                                                  └───────────┘
-                  (detected                                                    27 MHz xtal
-                   but driver
-                   removed)
+```mermaid
+graph LR
+    subgraph HF Path
+        HF[HF Antenna] --> PE[PE4304<br/>Step Att<br/>6-bit]
+        PE --> AD[AD8370<br/>VGA<br/>8-bit]
+        BIAS[BIAS_HF] --> LNA[JFET LNA]
+        LNA --> ADC
+        AD --> ADC
+    end
+
+    subgraph VHF Path
+        VHF[VHF Antenna] --> R8[R828D Tuner<br/>detected but<br/>driver removed]
+        R8 -->|to ADC| ADC
+    end
+
+    ADC[LTC2208<br/>16-bit ADC] -->|16-bit parallel<br/>GPIF II| FX3[CYUSB3014<br/>EZ-USB FX3]
+    FX3 -->|USB 3.0| HOST[Host PC]
+    FX3 <-->|I2C| SI[Si5351A<br/>Clock Synth<br/>27 MHz xtal]
 ```
 
 ### Key components
@@ -216,6 +216,21 @@ but initiated automatically.  If the PLL has lost lock, the watchdog
 leaves the pipeline stopped and waits for the host to reconfigure.
 Each recovery increments `glCounter[2]` (visible via `GETSTATS`).
 
+A per-session **recovery cap** (`glWdgMaxRecovery`, default 5) limits
+the number of consecutive watchdog recoveries before the watchdog
+stops retrying and waits for an explicit `STARTFX3` from the host.
+The cap counter (`glWdgRecoveryCount`) resets to zero whenever DMA
+resumes normally, and also on `STARTFX3` and `STOPFX3`.
+
+**Known limitation -- force-stop only:** Both STOPFX3 and the watchdog
+currently use `CyU3PGpifDisable(CyTrue)` (force-stop), which kills
+the SM mid-transaction.  The GPIF state machine's WAIT states
+(TH0_WAIT, TH1_WAIT) lack `!FW_TRG` exit transitions, so a clean
+soft-stop (`CyFalse`) cannot be guaranteed to complete.  A planned
+state machine change (see `PLAN-gpif-clean-stop.md`) adds `!FW_TRG →
+IDLE` transitions to the WAIT and TH0_RD states, which would enable
+reliable soft-stop.
+
 ---
 
 ## DMA architecture
@@ -229,18 +244,24 @@ system SRAM.
 
 For ADC streaming, the DMA path is:
 
-```
-GPIF II pins                                              USB 3.0 bus
-    │                                                         ▲
-    ▼                                                         │
-┌───────────┐    ┌───────────┐    ┌───────────┐    ┌─────────────────┐
-│PIB Socket │───►│  DMA      │───►│  DMA      │───►│  UIB Socket 1   │
-│  0 (PING) │    │  Buffer   │    │  Buffer   │    │  (USB EP1 IN)   │
-│PIB Socket │───►│  Pool     │───►│  (quad    │───►│                 │
-│  1 (PONG) │    │  (16 KB   │    │  buffered)│    │  Bulk endpoint  │
-└───────────┘    │  x 4)     │    └───────────┘    │  1024 B packets │
-                 └───────────┘                     │  burst of 16    │
-                                                   └─────────────────┘
+```mermaid
+graph LR
+    subgraph GPIF II Pins
+        P0[PIB Socket 0<br/>PING]
+        P1[PIB Socket 1<br/>PONG]
+    end
+
+    subgraph DMA Fabric
+        BUF[DMA Buffer Pool<br/>16 KB x 4<br/>quad-buffered]
+    end
+
+    subgraph USB 3.0 Bus
+        UIB[UIB Socket 1<br/>USB EP1 IN<br/>Bulk endpoint<br/>1024 B packets<br/>burst of 16]
+    end
+
+    P0 --> BUF
+    P1 --> BUF
+    BUF --> UIB
 ```
 
 The firmware configures this as a **`CY_U3P_DMA_TYPE_AUTO_MANY_TO_ONE`**
@@ -425,88 +446,57 @@ thread.
 
 ### Stage 1: CPU startup (`StartUp.c:main`)
 
-```
-Power on / USB reset
-  │
-  ├─ Configure system clock to 403 MHz
-  │    cpuClkDiv=2, dmaClkDiv=2, mmioClkDiv=2 → ~200 MHz each
-  │
-  ├─ Enable instruction and data caches
-  │
-  ├─ Configure I/O matrix
-  │    UART: enabled (debug console)
-  │    I2C: enabled (Si5351, R828D)
-  │    GPIF: 16-bit data bus
-  │    SPI, I2S: disabled
-  │
-  └─ CyU3PKernelEntry() → ThreadX RTOS starts (does not return)
+```mermaid
+graph TD
+    POWER[Power on / USB reset] --> CLK[Configure system clock to 403 MHz<br/>cpuClkDiv=2, dmaClkDiv=2, mmioClkDiv=2<br/>~200 MHz each]
+    CLK --> CACHE[Enable instruction and data caches]
+    CACHE --> IO[Configure I/O matrix<br/>UART: enabled · I2C: enabled<br/>GPIF: 16-bit · SPI, I2S: disabled]
+    IO --> RTOS["CyU3PKernelEntry()<br/>ThreadX RTOS starts (does not return)"]
 ```
 
 ### Stage 2: RTOS startup (`RunApplication.c:CyFxApplicationDefine`)
 
-```
-ThreadX calls CyFxApplicationDefine()
-  │
-  ├─ Turn off error LED (IndicateError(0))
-  │
-  ├─ Initialize debug console (UART at 115200, DMA receive channel)
-  │
-  ├─ Create glEventAvailable message queue (16 x uint32_t)
-  │
-  └─ Create application thread (priority 8, 1 KB stack)
-       → ApplicationThread() starts running
+```mermaid
+graph TD
+    TX[ThreadX calls CyFxApplicationDefine] --> LED["Turn off error LED<br/>IndicateError(0)"]
+    LED --> DBG[Initialize debug console<br/>UART at 115200, DMA receive channel]
+    DBG --> Q["Create glEventAvailable queue<br/>16 x uint32_t"]
+    Q --> THR["Create application thread<br/>priority 8, 1 KB stack"]
+    THR --> RUN["ApplicationThread() starts"]
 ```
 
 ### Stage 3: Hardware detection (`RunApplication.c:ApplicationThread`)
 
-```
-ApplicationThread()
-  │
-  ├─ Initialize GPIO clock module
-  │
-  ├─ Initialize I2C bus (400 kHz)
-  │
-  ├─ Initialize Si5351 clock synthesizer
-  │    Turn off all clock outputs (CLK0, CLK1, CLK2)
-  │
-  ├─ Detect RX888mk2 hardware
-  │    ├─ Enable Si5351 CLK2 at 16 MHz (VHF tuner reference)
-  │    ├─ Probe R828D tuner at I2C address 0x74
-  │    ├─ Read GPIO36 (hardware sense pin)
-  │    │    GPIO36 low → RX888r2 confirmed (glHWconfig = 0x04)
-  │    │    GPIO36 high → no radio detected (glHWconfig = 0x00)
-  │    └─ Disable Si5351 CLK2
-  │
-  ├─ Initialize rx888r2 GPIOs (if RX888r2 detected)
-  │    Configure 13 GPIOs as push-pull outputs
-  │    Set initial state: LEDs on, attenuators latched, PGA disabled
-  │
-  └─ Initialize USB stack
-       ├─ Allocate 64-byte EP0 buffer
-       ├─ Start USB driver
-       ├─ Register callbacks (setup, event, LPM)
-       ├─ Set all USB descriptors (SS, HS, FS, BOS, strings)
-       ├─ Populate serial number from FX3 hardware ID registers
-       └─ Connect USB pins (triggers enumeration)
+```mermaid
+graph TD
+    APP[ApplicationThread] --> GPIO[Initialize GPIO clock module]
+    GPIO --> I2C["Initialize I2C bus (400 kHz)"]
+    I2C --> SI[Initialize Si5351 clock synth<br/>Turn off CLK0, CLK1, CLK2]
+    SI --> DET{Detect RX888mk2 hardware}
+    DET --> CLK2["Enable Si5351 CLK2 at 16 MHz"]
+    CLK2 --> PROBE["Probe R828D tuner at I2C 0x74"]
+    PROBE --> G36{Read GPIO36<br/>hardware sense pin}
+    G36 -->|LOW| RX[RX888r2 confirmed<br/>glHWconfig = 0x04]
+    G36 -->|HIGH| NO[No radio detected<br/>glHWconfig = 0x00]
+    RX --> OFF[Disable Si5351 CLK2]
+    NO --> OFF
+    OFF --> GPIOS["Initialize rx888r2 GPIOs<br/>(if RX888r2 detected)<br/>13 push-pull outputs"]
+    GPIOS --> USB[Initialize USB stack<br/>EP0 buffer · USB driver · callbacks<br/>descriptors · serial number<br/>connect USB pins]
 ```
 
 ### Stage 4: USB enumeration and streaming
 
-```
-Host enumerates device
-  │
-  ├─ SET_CONFIGURATION triggers USBEventCallback
-  │    └─ StartApplication()
-  │         ├─ Initialize PIB clock (system clock / 2)
-  │         ├─ Configure EP1 IN bulk endpoint (1024 B, burst 16)
-  │         ├─ Create DMA multi-channel (PING+PONG → USB, 16 KB x 4)
-  │         ├─ Start DMA transfer (infinite)
-  │         ├─ Load and start GPIF state machine
-  │         └─ glIsApplnActive = true
-  │
-  └─ Application thread enters main loop
-       ├─ Every 100 ms: poll glEventAvailable queue, process events
-       └─ GPIF watchdog: detect DMA stalls, auto-recover if PLL locked
+```mermaid
+graph TD
+    ENUM[Host enumerates device] --> CFG[SET_CONFIGURATION<br/>triggers USBEventCallback]
+    CFG --> START["StartApplication()"]
+    START --> PIB["Initialize PIB clock<br/>(system clock / 2)"]
+    PIB --> EP1["Configure EP1 IN bulk<br/>1024 B, burst 16"]
+    EP1 --> DMA["Create DMA multi-channel<br/>PING+PONG → USB, 16 KB x 4"]
+    DMA --> XFER[Start DMA transfer — infinite]
+    XFER --> GPIF[Load and start GPIF state machine]
+    GPIF --> ACTIVE["glIsApplnActive = true"]
+    ACTIVE --> LOOP["Main loop<br/>100 ms poll: events + GPIF watchdog"]
 ```
 
 ---
@@ -803,19 +793,19 @@ every vendor command through `fx3_cmd`.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `SDDC_FX3/StartUp.c` | 82 | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | 262 | Application thread, hardware detection, main loop |
-| `SDDC_FX3/USBHandler.c` | 449 | USB setup callback (all vendor commands), USB init |
-| `SDDC_FX3/StartStopApplication.c` | 163 | GPIF/DMA/endpoint configuration, start/stop streaming |
-| `SDDC_FX3/DebugConsole.c` | 341 | UART init, debug buffer, console parser, USB debug |
+| `SDDC_FX3/RunApplication.c` | 349 | Application thread, hardware detection, main loop, GPIF watchdog |
+| `SDDC_FX3/USBHandler.c` | 554 | USB setup callback (all vendor commands), USB init |
+| `SDDC_FX3/StartStopApplication.c` | 212 | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
+| `SDDC_FX3/DebugConsole.c` | 349 | UART init, debug buffer, console parser, USB debug |
 | `SDDC_FX3/USBDescriptor.c` | 299 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
 | `SDDC_FX3/Support.c` | 185 | Error code lookup, status checking, error LED blink |
 | `SDDC_FX3/i2cmodule.c` | 90 | I2C master init and transfer functions |
-| `SDDC_FX3/driver/Si5351.c` | 283 | Si5351 clock synthesizer: PLL setup, frequency calculation |
-| `SDDC_FX3/radio/rx888r2.c` | 88 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
-| `SDDC_FX3/Application.h` | 94 | Central header: includes, defines, prototypes |
-| `SDDC_FX3/protocol.h` | 81 | USB protocol: vendor request codes, GPIO enums, arguments |
+| `SDDC_FX3/driver/Si5351.c` | 328 | Si5351 clock synthesizer: PLL setup, frequency calculation, lock status |
+| `SDDC_FX3/radio/rx888r2.c` | 89 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
+| `SDDC_FX3/Application.h` | 96 | Central header: includes, defines, prototypes |
+| `SDDC_FX3/protocol.h` | 84 | USB protocol: vendor request codes, GPIO enums, arguments |
 | `SDDC_FX3/SDDC_GPIF.h` | 173 | Generated GPIF II state machine configuration |
 | `SDDC_FX3/cyfxtx.c` | -- | Cypress SDK memory and TX runtime support |
 | `SDDC_FX3/cyfx_gcc_startup.S` | -- | ARM GCC startup assembly (vectors, stack init) |
-| `tests/fx3_cmd.c` | 1104 | Host-side vendor command exerciser and test harness (libusb) |
-| `tests/fw_test.sh` | 539 | TAP test harness for automated firmware testing |
+| `tests/fx3_cmd.c` | 4714 | Host-side vendor command exerciser, soak test harness (libusb) |
+| `tests/fw_test.sh` | 701 | TAP test harness for automated firmware testing (36 tests + 3 streaming) |

@@ -79,7 +79,7 @@ and alignment ambiguity on the ARM926EJ-S target.
 | `pib_underrun_count` | Combined into single PIB error counter |
 | `usb_phy_errors` / `usb_link_errors` | Requires `CyU3PUsbGetErrorCounts()` — low priority, host can't act on it |
 | `streaming` | Host already knows (it issues START/STOP) |
-| `recovery_count` | No autonomous recovery logic exists yet |
+| `recovery_count` | Watchdog recovery IS implemented; count is embedded in `glCounter[2]` (GETSTATS offset 15-18) |
 
 Full protocol details: [`SDDC_FX3/docs/debugging.md` §5](../SDDC_FX3/docs/debugging.md).
 
@@ -128,9 +128,9 @@ count) as a superset.
 | `usb_phy_errors` | `CyU3PUsbGetErrorCounts(&phy, &link)` | No | SDK API available, not yet wired |
 | `usb_link_errors` | Same API, second output | No | SDK API available, not yet wired |
 | `gpif_state` | `CyU3PGpifGetSMState(&state)` | **Yes** | Offset 4 |
-| `si5351_status` | `I2cTransfer(0x00, 0xC0, 1, &status, CyTrue)` | No | Planned next — see §4 "PLL lock status" |
+| `si5351_status` | `I2cTransfer(0x00, 0xC0, 1, &status, CyTrue)` | **Yes** | Offset 19 |
 | `streaming` | `glIsApplnActive` | No | Host already knows |
-| `recovery_count` | New counter, increment on autonomous recovery | No | No recovery logic yet |
+| `recovery_count` | `glWdgRecoveryCount` / `glCounter[2]` | **Yes** | Offset 15--18 (shared with EP underrun counter) |
 | *(bonus)* last PIB arg | `glLastPibArg` in `PibErrorCallback` | **Yes** | Offset 9--10, not in original proposal |
 | *(bonus)* I2C failures | `glCounter[1]` in `I2cTransfer` | **Yes** | Offset 11--14, not in original proposal |
 
@@ -529,33 +529,32 @@ need to be modified for any feature described in this document.
 
 ### What WOULD require GPIF state machine changes
 
-The related document `wedge_detection.md` describes a priority 6
-enhancement: adding hardware-level timeout transitions so the GPIF
-state machine can self-recover from stalls.  Specifically:
+**Status: actively planned — see `PLAN-gpif-clean-stop.md`.**
 
-- The current BUSY/WAIT states (TH0_BUSY=5, TH1_BUSY=7, TH0_WAIT=9,
-  TH1_WAIT=8) wait **indefinitely** for DMA buffer availability.
-  The state counter (`CY_U3P_PIB_GPIF_STATE_COUNT_CONFIG`) is
-  currently disabled (`0x00000000`).
-- Adding a state counter timeout that transitions back to IDLE after
-  N cycles would allow the state machine to autonomously break out
-  of a stall.
-- Firing `INTR_CPU` (beta output bit 18) on BUSY state entry would
-  give sub-microsecond stall notification to the firmware.
+The related document `wedge_detection.md` describes a priority 6
+enhancement: adding `!FW_TRG → IDLE` exit transitions to the GPIF
+state machine so it can cleanly stop from any active state.
+
+The current problem: only TH1_RD (state 6) has a `!FW_TRG → IDLE`
+transition.  The WAIT states (TH0_WAIT=9, TH1_WAIT=8) and TH0_RD
+(state 2) have no clean exit, forcing every stop and recovery to use
+`CyU3PGpifDisable(CyTrue)` (force-stop), which corrupts DMA state.
+
+The planned fix adds 3 transitions (one per state with a free slot),
+enabling reliable soft-stop within 3 clock cycles.  See
+`PLAN-gpif-clean-stop.md` for the complete transition audit and
+waveform sharing analysis.
 
 These changes require:
 
 1. **GPIF II Designer** (Windows GUI tool, part of the full SDK
    installer) to modify the state machine
 2. Regenerating `SDDC_GPIF.h` from the modified design
-3. The original `.cyfx` project file (not present in this repo --
-   only the generated output exists)
+3. The GPIF model XML (`SDDC_FX3/SDDC_GPIF/projectfiles/gpif2model.xml`)
+   is present in this repo
 
-**Recommendation**: The software-based polling approach (DMA count
-monitoring + GPIF state polling at 100 ms intervals + PIB error
-callback) provides adequate detection latency for the diagnostic
-side-channel use case.  The GPIF state machine redesign is only
-warranted if sub-microsecond autonomous firmware recovery is needed
-(e.g., recovering within a single DMA buffer period of ~128 us at
-64 MSPS).  Start with the application-level changes; consider the
-state machine redesign as a future optimization if needed.
+**Note**: The diagnostic side-channel features (GETSTATS, PIB
+callback, DMA monitoring) do NOT require any GPIF state machine
+changes.  They observe the existing SM from the outside.  The
+clean-stop change is a separate reliability improvement that would
+reduce the streaming fault rate visible in GETSTATS.
