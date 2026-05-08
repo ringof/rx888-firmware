@@ -406,3 +406,100 @@ changes are in `USBHandler.c` and `RunApplication.c`.
 | `SDDC_FX3/SDDC_GPIF.h` | Regenerated from Designer (wavedata, positions, transitions) |
 | `SDDC_FX3/USBHandler.c` | STOPFX3: soft-stop; STARTFX3: soft-stop |
 | `SDDC_FX3/RunApplication.c` | Watchdog: soft-stop before recovery |
+
+## Implementation notes
+
+Implementation completed on branch `claude/fix-fx3stop-issue-c4Gge`.
+Commits: `8e00ab8` (firmware + tests), `02f0629`/`33eb922` (Designer waveform),
+`2e50b1e` (Designer project sync).
+
+### Divergences from plan
+
+**1. Waveform descriptor sharing resolved differently than predicted**
+
+The plan predicted either unchanged sharing (`{0,1,2,3,4,5,6,7,2,1}`) or
+fully broken sharing (`{0,1,2,3,4,5,6,7,8,9}`).  The Designer chose a
+third option:
+
+```
+{0,1,2,3,4,5,6,7,2,6}
+```
+
+- TH0_RD (state 2) and TH1_WAIT (state 8) share position 2 — both have
+  alpha → state 3 (TH1_RD_LD) and beta → state 1 (IDLE via !FW_TRG).
+- TH1_RD (state 6) and TH0_WAIT (state 9) share position 6 — both have
+  alpha → state 4 (TH0_RD_LD) and beta → state 1 (IDLE via !FW_TRG).
+- TH0_WAIT moved from sharing with IDLE (pos 1) to sharing with TH1_RD
+  (pos 6).  Still 8 unique descriptors, well within the 256 limit.
+
+**2. Force-stop fallback added to all soft-stop sites**
+
+The plan showed bare `CyU3PGpifDisable(CyFalse)`.  The implementation
+wraps every soft-stop in a fallback pattern:
+
+```c
+CyU3PGpifControlSWInput(CyFalse);
+CyU3PThreadSleep(1);
+{
+    CyU3PReturnStatus_t gpifRc;
+    gpifRc = CyU3PGpifDisable(CyFalse);
+    if (gpifRc != CY_U3P_SUCCESS) {
+        DebugPrint(4, "\r\n... soft-stop fail %d, forcing", gpifRc);
+        CyU3PGpifDisable(CyTrue);
+    }
+}
+```
+
+Rationale: soft-stop requires the external clock (Si5351) to advance the
+SM.  If the clock is dead or the PLL is unlocked, the SM cannot transition
+and `CyU3PGpifDisable(CyFalse)` fails.  The fallback ensures the SM is
+always stopped, even under hardware fault.  This applies to STOPFX3,
+STARTFX3, and watchdog recovery.
+
+**3. New transition XML IDs assigned by Designer**
+
+The plan listed "—" for the new transition IDs.  The Designer assigned:
+
+| Transition | Source → Dest | Equation |
+|------------|---------------|----------|
+| TRANSITION5 | STATE7 (TH0_WAIT) → STATE8 (IDLE) | !FW_TRG |
+| TRANSITION6 | STATE6 (TH1_WAIT) → STATE8 (IDLE) | !FW_TRG |
+| TRANSITION7 | STATE1 (TH0_RD) → STATE8 (IDLE) | !FW_TRG |
+
+**4. New tests added**
+
+Two targeted tests were added to `tests/fx3_cmd.c` and `tests/fw_test.sh`:
+
+- **gpif_soft_stop** (test #29): 10 start/stop cycles at 64 MS/s.  Each
+  cycle verifies the GPIF SM lands in state 1 (IDLE) after STOPFX3.
+  FAILs if any cycle produces state 255 (force-stop fallback fired).
+- **stop_under_backpressure** (test #30): 5 cycles that start streaming
+  without reading the endpoint, wait 200 ms for DMA buffers to fill
+  (forcing the SM into a WAIT state), then issue STOPFX3 and verify
+  the SM reaches IDLE and streaming resumes afterward.
+
+**5. Additional files modified**
+
+The plan listed 4 files.  The full set of changed files:
+
+| File | Change |
+|------|--------|
+| `SDDC_FX3/SDDC_GPIF/projectfiles/gpif2model.xml` | 3 new transitions added in Designer |
+| `SDDC_FX3/SDDC_GPIF/projectfiles/gpif2view.xml` | Visual layout updated by Designer |
+| `SDDC_FX3/SDDC_GPIF/projectfiles/gpif2timingsimulation.xml` | Timing sim updated by Designer |
+| `SDDC_FX3/SDDC_GPIF/SDDC_GPIF.cyfx` | Project file updated by Designer |
+| `SDDC_FX3/SDDC_GPIF.h` | Regenerated waveform header |
+| `SDDC_FX3/USBHandler.c` | STOPFX3 + STARTFX3: soft-stop with fallback |
+| `SDDC_FX3/RunApplication.c` | Watchdog: soft-stop with fallback |
+| `tests/fx3_cmd.c` | New tests: gpif_soft_stop, stop_under_backpressure |
+| `tests/fw_test.sh` | New tests #29, #30; renumbered #31–#33 |
+
+### Validation status
+
+- **Waveform verified:** All 16 transitions cross-referenced between
+  gpif2model.xml, gpif2view.xml, and SDDC_GPIF.h waveform descriptors.
+  Destination state indices decoded from `CyFxGpifWavedata[][0] & 0xF`
+  match the model in all 8 descriptor positions.
+- **Awaiting hardware test:** Clean build, flash, and soak test on RX888
+  hardware.  Baseline: 239 streaming faults / 688 cycles, 69%
+  dma_count_monotonic pass rate.
