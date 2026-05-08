@@ -334,7 +334,16 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 				}
-				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
+				/* Soft-stop: deassert FW_TRG and let SM exit to IDLE.
+				 * REQUIRES updated SDDC_GPIF.h waveform with !FW_TRG
+				 * exits on TH0_RD, TH0_WAIT, TH1_WAIT. */
+				CyU3PGpifControlSWInput(CyFalse);
+				{
+					CyU3PReturnStatus_t gpifRc;
+					gpifRc = CyU3PGpifDisable(CyFalse);  /* soft-stop */
+					if (gpifRc != CY_U3P_SUCCESS)
+						CyU3PGpifDisable(CyTrue);  /* fallback: force-stop */
+				}
 				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 				CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);  /* reclaim USB-side DMA descriptors
 				    * left by the previous session; without this, zombie descriptors
@@ -375,13 +384,26 @@ CyFxSlFifoApplnUSBSetupCB (
 			case STOPFX3:
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-					CyU3PGpifControlSWInput(CyFalse);  /* deassert FW_TRG before disable */
-					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
-					/* Do NOT call CyU3PGpifLoad() here — it re-enables the GPIF
-					 * block, causing the SM to auto-advance.  STARTFX3 will reload
-					 * the waveform via StartGPIF() when streaming resumes. */
+					/* Soft-stop: deassert FW_TRG so the GPIF SM exits to IDLE
+					 * via the !FW_TRG transitions added in SDDC_GPIF.h.
+					 * REQUIRES the updated waveform with !FW_TRG exits on
+					 * TH0_RD, TH0_WAIT, and TH1_WAIT states.  Without
+					 * the new waveform, the SM will hang in WAIT states
+					 * and the soft-stop below will fail. */
+					CyU3PGpifControlSWInput(CyFalse);
+					CyU3PThreadSleep(1);  /* SM reaches IDLE within 3 clocks;
+					                       * sleep 1 ms for DMA quiesce */
+					{
+						CyU3PReturnStatus_t gpifRc;
+						gpifRc = CyU3PGpifDisable(CyFalse);  /* soft-stop */
+						if (gpifRc != CY_U3P_SUCCESS) {
+							/* Fallback: SM did not reach IDLE — force-stop.
+							 * This path should not fire with the new waveform. */
+							DebugPrint(4, "\r\nSTP soft-stop fail %d, forcing", gpifRc);
+							CyU3PGpifDisable(CyTrue);
+						}
+					}
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
-					CyU3PThreadSleep(1);  /* let DMA controller quiesce before next STARTFX3 */
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
 					glWdgRecoveryCount = 0;  /* reset recovery cap */

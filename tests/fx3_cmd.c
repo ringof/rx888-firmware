@@ -526,6 +526,8 @@ static int do_test_ep0_hammer(libusb_device_handle *h);
 static int do_test_debug_cmd_while_stream(libusb_device_handle *h);
 static int do_test_adc_freq_extremes(libusb_device_handle *h);
 static int do_test_data_sanity(libusb_device_handle *h);
+static int do_test_gpif_soft_stop(libusb_device_handle *h);
+static int do_test_stop_under_backpressure(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -577,6 +579,8 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"debug_cmd_while_stream", do_test_debug_cmd_while_stream},
     {"adc_freq_extremes", do_test_adc_freq_extremes},
     {"data_sanity",      do_test_data_sanity},
+    {"gpif_soft_stop",   do_test_gpif_soft_stop},
+    {"stop_under_backpressure", do_test_stop_under_backpressure},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -622,6 +626,8 @@ static void print_local_help(void)
            "  debug_cmd_while_stream        Debug command during stream\n"
            "  adc_freq_extremes             Edge ADC frequencies\n"
            "  data_sanity                   Bulk data corruption check\n"
+           "  gpif_soft_stop                Verify SM lands in IDLE (needs new waveform)\n"
+           "  stop_under_backpressure       STOP while DMA buffers full\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -1663,14 +1669,21 @@ static int do_test_stop_gpif_state(libusb_device_handle *h)
         return 1;
     }
 
-    /* State 0 = RESET, 1 = IDLE (graceful stop),
-     * 255 = GPIF block disabled (CyU3PGpifDisable with force=true) */
-    if (s.gpif_state == 0 || s.gpif_state == 1 || s.gpif_state == 255) {
-        printf("PASS stop_gpif_state: GPIF state=%u after STOP (SM properly stopped)\n",
+    /* State 1 = IDLE: SM exited cleanly via !FW_TRG (new waveform).
+     * State 255 = GPIF disabled: force-stop fallback fired.
+     * State 0 = RESET: acceptable but unexpected. */
+    if (s.gpif_state == 1) {
+        printf("PASS stop_gpif_state: GPIF state=%u after STOP (clean soft-stop to IDLE)\n",
                s.gpif_state);
         return 0;
     }
-    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 0, 1, or 255; SM still running)\n",
+    if (s.gpif_state == 0 || s.gpif_state == 255) {
+        printf("PASS stop_gpif_state: GPIF state=%u after STOP "
+               "(stopped, but via force-stop fallback — new waveform not loaded?)\n",
+               s.gpif_state);
+        return 0;
+    }
+    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 1; SM still running)\n",
            s.gpif_state);
     return 1;
 }
@@ -3737,6 +3750,162 @@ static int do_test_data_sanity(libusb_device_handle *h)
     printf("PASS data_sanity: %d/%d saturated samples (%.1f%%, "
            "within threshold)\n",
            saturated, nsamples, 100.0 * saturated / nsamples);
+    return 0;
+}
+
+/* Verify that STOPFX3 leaves the GPIF SM in IDLE (state 1) rather than
+ * disabled (state 255).  State 1 means the SM exited cleanly via the
+ * !FW_TRG transitions.  State 255 means force-stop fired — the new
+ * waveform is either not loaded or the transitions are wrong.
+ *
+ * REQUIRES: updated SDDC_GPIF.h with !FW_TRG exits on TH0_RD,
+ * TH0_WAIT, and TH1_WAIT.  Without the new waveform this test will
+ * report FAIL (state 255 instead of 1). */
+static int do_test_gpif_soft_stop(libusb_device_handle *h)
+{
+    int r;
+    int cycles = 10;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL gpif_soft_stop: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    int soft_count = 0;
+    int force_count = 0;
+
+    for (int i = 0; i < cycles; i++) {
+        int got = (i == 0) ? primed_start_and_read_retry(h, 16384, 2000)
+                           : primed_start_and_read(h, 16384, 2000);
+        if (got < 1024) {
+            struct fx3_stats s = {0};
+            read_stats(h, &s);
+            printf("FAIL gpif_soft_stop: cycle %d/%d: no data (got=%d, GPIF=%u)\n",
+                   i + 1, cycles, got < 0 ? 0 : got, s.gpif_state);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+
+        r = cmd_u32(h, STOPFX3, 0);
+        if (r < 0) {
+            printf("FAIL gpif_soft_stop: STOPFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(50000);
+
+        struct fx3_stats s = {0};
+        read_stats(h, &s);
+
+        if (s.gpif_state == 1)
+            soft_count++;
+        else if (s.gpif_state == 0 || s.gpif_state == 255)
+            force_count++;
+        else {
+            printf("FAIL gpif_soft_stop: cycle %d/%d: GPIF state=%u "
+                   "(SM still running after STOP)\n",
+                   i + 1, cycles, s.gpif_state);
+            return 1;
+        }
+        usleep(50000);
+    }
+
+    if (force_count > 0) {
+        printf("FAIL gpif_soft_stop: %d/%d cycles used force-stop (state 0/255), "
+               "expected all soft-stop (state 1) — new waveform not loaded?\n",
+               force_count, cycles);
+        return 1;
+    }
+
+    printf("PASS gpif_soft_stop: %d/%d cycles stopped cleanly to IDLE (state 1)\n",
+           soft_count, cycles);
+    return 0;
+}
+
+/* Provoke DMA backpressure (start streaming at 64 MS/s, don't read EP1),
+ * then issue STOPFX3 and verify the SM exits cleanly to IDLE.
+ *
+ * Before the fix: SM is stuck in TH0_WAIT or TH1_WAIT (states 8/9)
+ * because there are no !FW_TRG transitions out of WAIT states.
+ * STOPFX3 must force-stop, leaving state 255 and DMA debris.
+ *
+ * After the fix: SM exits WAIT → IDLE via !FW_TRG, soft-stop succeeds,
+ * and the next streaming session starts cleanly.
+ *
+ * REQUIRES: updated SDDC_GPIF.h with !FW_TRG exits on TH0_WAIT
+ * and TH1_WAIT. */
+static int do_test_stop_under_backpressure(libusb_device_handle *h)
+{
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL stop_under_backpressure: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    int cycles = 5;
+    int soft_count = 0;
+
+    for (int i = 0; i < cycles; i++) {
+        /* Start streaming */
+        r = cmd_u32_retry(h, STARTFX3, 0);
+        if (r < 0) {
+            printf("FAIL stop_under_backpressure: STARTFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+
+        /* Do NOT read EP1 — let DMA buffers fill and GPIF enter WAIT.
+         * At 64 MS/s the 4x16KB buffers fill in ~0.5 ms; wait 200ms
+         * to ensure the SM is firmly stuck in a WAIT state. */
+        usleep(200000);
+
+        /* Stop — this is the critical test */
+        r = cmd_u32(h, STOPFX3, 0);
+        if (r < 0) {
+            printf("FAIL stop_under_backpressure: STOPFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(50000);
+
+        struct fx3_stats s = {0};
+        read_stats(h, &s);
+
+        if (s.gpif_state == 1) {
+            soft_count++;
+        } else if (s.gpif_state != 0 && s.gpif_state != 255) {
+            printf("FAIL stop_under_backpressure: cycle %d/%d: "
+                   "GPIF state=%u after STOP under backpressure (SM stuck)\n",
+                   i + 1, cycles, s.gpif_state);
+            return 1;
+        }
+
+        /* Verify recovery: start again and confirm data flows */
+        int got = primed_start_and_read(h, 16384, 2000);
+        cmd_u32(h, STOPFX3, 0);
+
+        if (got < 1024) {
+            printf("FAIL stop_under_backpressure: cycle %d/%d: "
+                   "only %d bytes after recovery (device wedged)\n",
+                   i + 1, cycles, got < 0 ? 0 : got);
+            return 1;
+        }
+        usleep(100000);
+    }
+
+    if (soft_count < cycles) {
+        printf("PASS stop_under_backpressure: %d/%d cycles recovered, "
+               "but only %d used soft-stop (new waveform not loaded?)\n",
+               cycles, cycles, soft_count);
+        return 0;
+    }
+
+    printf("PASS stop_under_backpressure: %d/%d cycles: "
+           "clean soft-stop from WAIT state + data resumed\n",
+           soft_count, cycles);
     return 0;
 }
 
