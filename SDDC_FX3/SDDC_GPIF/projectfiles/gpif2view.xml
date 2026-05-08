@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+﻿﻿<?xml version="1.0" encoding="UTF-8"?>
 <Root version="4">
   <CyStates>
     <CyNormalState>
@@ -13,8 +13,8 @@
       <ParentID>00000000-0000-0000-0000-000000000000</ParentID>
     </CyNormalState>
     <CyNormalState>
-      <Left>543</Left>
-      <Top>240</Top>
+      <Left>643</Left>
+      <Top>237</Top>
       <Width>83</Width>
       <Height>70</Height>
       <Name>STATE5</Name>
@@ -24,8 +24,8 @@
       <ParentID>00000000-0000-0000-0000-000000000000</ParentID>
     </CyNormalState>
     <CyNormalState>
-      <Left>882</Left>
-      <Top>470.723333333333</Top>
+      <Left>881</Left>
+      <Top>546.723333333333</Top>
       <Width>83</Width>
       <Height>70</Height>
       <Name>STATE0</Name>
@@ -46,8 +46,8 @@
       <ParentID>00000000-0000-0000-0000-000000000000</ParentID>
     </CyNormalState>
     <CyNormalState>
-      <Left>1094</Left>
-      <Top>318.723333333333</Top>
+      <Left>1070</Left>
+      <Top>282.723333333333</Top>
       <Width>83</Width>
       <Height>70</Height>
       <Name>STATE3</Name>
@@ -68,8 +68,8 @@
       <ParentID>00000000-0000-0000-0000-000000000000</ParentID>
     </CyNormalState>
     <CyNormalState>
-      <Left>1093</Left>
-      <Top>494.723333333333</Top>
+      <Left>1153</Left>
+      <Top>427.723333333333</Top>
       <Width>83</Width>
       <Height>70</Height>
       <Name>STATE6</Name>
@@ -79,8 +79,8 @@
       <ParentID>00000000-0000-0000-0000-000000000000</ParentID>
     </CyNormalState>
     <CyNormalState>
-      <Left>623</Left>
-      <Top>68.723333333333</Top>
+      <Left>735</Left>
+      <Top>71.723333333333</Top>
       <Width>83</Width>
       <Height>70</Height>
       <Name>STATE7</Name>
@@ -90,8 +90,8 @@
       <ParentID>00000000-0000-0000-0000-000000000000</ParentID>
     </CyNormalState>
     <CyNormalState>
-      <Left>223</Left>
-      <Top>197.41</Top>
+      <Left>254</Left>
+      <Top>314.41</Top>
       <Width>83</Width>
       <Height>70</Height>
       <Name>STATE8</Name>
@@ -113,6 +113,39 @@
     </CyStartState>
   </CyStates>
   <CyTransitions>
+    <CyTransition>
+      <Name>TRANSITION7</Name>
+      <TransitionEquation>!FW_TRG</TransitionEquation>
+      <SourceName>STATE1</SourceName>
+      <SinkName>STATE8</SinkName>
+      <SourceConnectorName>Connector</SourceConnectorName>
+      <SinkConnectorName>Connector</SinkConnectorName>
+      <SourceArrowSymbol>None</SourceArrowSymbol>
+      <SinkArrowSymbol>Arrow</SinkArrowSymbol>
+      <zIndex>0</zIndex>
+    </CyTransition>
+    <CyTransition>
+      <Name>TRANSITION6</Name>
+      <TransitionEquation>!FW_TRG</TransitionEquation>
+      <SourceName>STATE6</SourceName>
+      <SinkName>STATE8</SinkName>
+      <SourceConnectorName>Connector</SourceConnectorName>
+      <SinkConnectorName>Connector</SinkConnectorName>
+      <SourceArrowSymbol>None</SourceArrowSymbol>
+      <SinkArrowSymbol>Arrow</SinkArrowSymbol>
+      <zIndex>0</zIndex>
+    </CyTransition>
+    <CyTransition>
+      <Name>TRANSITION5</Name>
+      <TransitionEquation>!FW_TRG</TransitionEquation>
+      <SourceName>STATE7</SourceName>
+      <SinkName>STATE8</SinkName>
+      <SourceConnectorName>Connector</SourceConnectorName>
+      <SinkConnectorName>Connector</SinkConnectorName>
+      <SourceArrowSymbol>None</SourceArrowSymbol>
+      <SinkArrowSymbol>Arrow</SinkArrowSymbol>
+      <zIndex>0</zIndex>
+    </CyTransition>
     <CyTransition>
       <Name>TRANSITION4</Name>
       <TransitionEquation>!FW_TRG</TransitionEquation>
