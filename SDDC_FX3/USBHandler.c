@@ -339,10 +339,13 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * exits on TH0_RD, TH0_WAIT, TH1_WAIT. */
 				CyU3PGpifControlSWInput(CyFalse);
 				{
-					CyU3PReturnStatus_t gpifRc;
-					gpifRc = CyU3PGpifDisable(CyFalse);  /* soft-stop */
-					if (gpifRc != CY_U3P_SUCCESS)
-						CyU3PGpifDisable(CyTrue);  /* fallback: force-stop */
+					uint8_t smState = 0xFF;
+					CyU3PGpifGetSMState(&smState);
+					if (smState == 1 /* IDLE */) {
+						CyU3PGpifDisable(CyFalse);
+					} else {
+						CyU3PGpifDisable(CyTrue);
+					}
 				}
 				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 				CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);  /* reclaim USB-side DMA descriptors
@@ -394,12 +397,12 @@ CyFxSlFifoApplnUSBSetupCB (
 					CyU3PThreadSleep(1);  /* SM reaches IDLE within 3 clocks;
 					                       * sleep 1 ms for DMA quiesce */
 					{
-						CyU3PReturnStatus_t gpifRc;
-						gpifRc = CyU3PGpifDisable(CyFalse);  /* soft-stop */
-						if (gpifRc != CY_U3P_SUCCESS) {
-							/* Fallback: SM did not reach IDLE — force-stop.
-							 * This path should not fire with the new waveform. */
-							DebugPrint(4, "\r\nSTP soft-stop fail %d, forcing", gpifRc);
+						uint8_t smState = 0xFF;
+						CyU3PGpifGetSMState(&smState);
+						if (smState == 1 /* IDLE */) {
+							CyU3PGpifDisable(CyFalse);
+						} else {
+							DebugPrint(4, "\r\nSTP soft-stop fail SM=%d, forcing", smState);
 							CyU3PGpifDisable(CyTrue);
 						}
 					}

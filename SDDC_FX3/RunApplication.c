@@ -260,10 +260,12 @@ void ApplicationThread ( uint32_t input)
 									CyU3PGpifControlSWInput(CyFalse);
 									CyU3PThreadSleep(1);
 									{
-										CyU3PReturnStatus_t gpifRc;
-										gpifRc = CyU3PGpifDisable(CyFalse);
-										if (gpifRc != CY_U3P_SUCCESS) {
-											DebugPrint(4, "\r\nWDG: soft-stop fail %d, forcing", gpifRc);
+										uint8_t smState = 0xFF;
+										CyU3PGpifGetSMState(&smState);
+										if (smState == 1 /* IDLE */) {
+											CyU3PGpifDisable(CyFalse);
+										} else {
+											DebugPrint(4, "\r\nWDG: soft-stop fail SM=%d, forcing", smState);
 											CyU3PGpifDisable(CyTrue);
 										}
 									}
