@@ -98,4 +98,4 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["radiod", "-f", "/etc/radio/radiod@rx888-test.conf"]
+CMD ["radiod", "/etc/radio/radiod@rx888-test.conf"]

@@ -81,7 +81,7 @@ Then inside the container:
 lsusb -d 04b4:
 
 # Run radiod manually
-radiod -f /etc/radio/radiod@rx888-test.conf
+radiod /etc/radio/radiod@rx888-test.conf
 
 # In another terminal (docker exec):
 # Tune to a frequency
