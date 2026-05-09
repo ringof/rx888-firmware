@@ -334,19 +334,14 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 				}
-				/* Soft-stop: deassert FW_TRG and let SM exit to IDLE.
-				 * REQUIRES updated SDDC_GPIF.h waveform with !FW_TRG
-				 * exits on TH0_RD, TH0_WAIT, TH1_WAIT. */
+				/* Stop any running SM before restart.  Always use
+				 * CyTrue (force-reload) here because StartGPIF()
+				 * calls CyU3PGpifLoad() which reloads the config
+				 * anyway — CyFalse offers no benefit and crashed
+				 * the device when the SM wasn't in IDLE (no sleep
+				 * in this path, unlike STOPFX3). */
 				CyU3PGpifControlSWInput(CyFalse);
-				{
-					uint8_t smState = 0xFF;
-					CyU3PGpifGetSMState(&smState);
-					if (smState == 1 /* IDLE */) {
-						CyU3PGpifDisable(CyFalse);
-					} else {
-						CyU3PGpifDisable(CyTrue);
-					}
-				}
+				CyU3PGpifDisable(CyTrue);
 				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 				CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);  /* reclaim USB-side DMA descriptors
 				    * left by the previous session; without this, zombie descriptors
