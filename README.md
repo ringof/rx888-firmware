@@ -121,6 +121,37 @@ what state the firmware was in.
 Soak testing (500+ randomized cycles) demonstrates 100% health-check
 pass rate and zero device crashes with this architecture.
 
+## Docker — ka9q-radio Compatibility Testing
+
+The `docker/ka9q-radio/` directory provides a containerized
+[ka9q-radio](https://github.com/ka9q/ka9q-radio) environment for
+end-to-end firmware validation against a real-world SDR application.
+
+ka9q-radio is a widely used SDR receiver that drives the RX888mk2
+directly via libusb — it programs the Si5351 clock via I2C passthrough,
+controls GPIO and attenuator settings, and streams IQ data through the
+GPIF pipeline.  Testing against it exercises firmware code paths
+(firmware upload, `STARTFX3`/`STOPFX3` cycling, `I2CWFX3`, `GPIOFX3`,
+`SETARGFX3`) that the low-level test harness in `tests/` does not cover.
+
+The Docker container builds only the `radiod` core, the `rx888.so`
+plugin, and control utilities — no other SDR hardware drivers are
+included.  It runs with `--privileged` (required because the FX3
+changes USB PID during firmware upload) and `--network host` (for
+ka9q-radio's multicast output).
+
+```
+docker build -t ka9q-radio docker/ka9q-radio/
+docker run --rm -it --privileged \
+  -v /dev/bus/usb:/dev/bus/usb \
+  -v $(pwd)/SDDC_FX3:/firmware \
+  --network host \
+  ka9q-radio
+```
+
+See `docker/ka9q-radio/README.md` for detailed usage and known
+compatibility notes.
+
 ## Repository Layout
 
 ```
@@ -130,7 +161,14 @@ SDDC_FX3/           Firmware source code
 SDK/                Cypress FX3 SDK 1.3.4 (headers, libraries, build system)
 tests/              Hardware test tools
   rx888_tools/      Submodule: USB streamer and firmware uploader
+docker/             Docker-based integration testing
+  ka9q-radio/       ka9q-radio radiod + rx888 plugin container
 docs/               Project documentation and analysis
+  architecture.md   Firmware architecture overview
+  gpif-and-recovery.md  GPIF state machine design and recovery layers
+  diagnostics_side_channel.md  Debug and diagnostics interface
+  wedge_detection.md  DMA stall detection and watchdog design
+  LICENSE_ANALYSIS.md  License audit of SDK and dependencies
 ```
 
 ## License
