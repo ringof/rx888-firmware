@@ -222,14 +222,12 @@ stops retrying and waits for an explicit `STARTFX3` from the host.
 The cap counter (`glWdgRecoveryCount`) resets to zero whenever DMA
 resumes normally, and also on `STARTFX3` and `STOPFX3`.
 
-**Known limitation -- force-stop only:** Both STOPFX3 and the watchdog
-currently use `CyU3PGpifDisable(CyTrue)` (force-stop), which kills
-the SM mid-transaction.  The GPIF state machine's WAIT states
-(TH0_WAIT, TH1_WAIT) lack `!FW_TRG` exit transitions, so a clean
-soft-stop (`CyFalse`) cannot be guaranteed to complete.  A planned
-state machine change (see `PLAN-gpif-clean-stop.md`) adds `!FW_TRG →
-IDLE` transitions to the WAIT and TH0_RD states, which would enable
-reliable soft-stop.
+The GPIF state machine includes `!FW_TRG → IDLE` exit transitions
+on all active states that can stall, enabling clean soft-stop without
+DMA debris.  STOPFX3 and the watchdog deassert FW_TRG, verify the SM
+reached IDLE, then disable — falling back to force-stop only if the
+external clock is dead.  See [gpif-and-recovery.md](gpif-and-recovery.md)
+for the full state machine design and recovery architecture.
 
 ---
 
