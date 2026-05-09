@@ -124,9 +124,18 @@ Typical session (three terminals):
 # Terminal C — drop into the container to operate the radio:
 ./ka9q.sh console
 # inside the container:
-control hf.local                      # curses tuner UI
-tune    hf.local 14.074m              # one-shot tune
+control hf.local                      # curses tuner UI (recommended)
+
+# Or one-shot (requires the channel's SSRC, defined in radiod config —
+# easier to just use `control` above which shows you all channels):
+tune -r hf.local -s <ssrc> -f 14.074m
 ```
+
+`control hf.local` and `tune` resolve `*.local` names via mDNS;
+the runtime image installs `libnss-mdns` so glibc's `getaddrinfo`
+asks the in-container avahi-daemon for `.local` lookups.  If
+`Temporary failure in name resolution` appears, the image is from
+before this was added — rebuild with `docker build --no-cache`.
 
 To shut down: `./ka9q.sh stop`.
 

@@ -84,6 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfftw3-bin \
     avahi-daemon \
     avahi-utils \
+    libnss-mdns \
     dbus \
     procps \
     usbutils \
