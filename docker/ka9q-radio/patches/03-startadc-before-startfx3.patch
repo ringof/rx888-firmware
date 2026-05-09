@@ -1,0 +1,70 @@
+From: SDDC_FX3 maintainers
+Subject: [PATCH] rx888: send STARTADC before STARTFX3 for SDDC firmware compatibility
+
+Symptom: with patches 01 and 02 applied and the container correctly
+seeing the loaded device, radiod runs through full init and prints
+"rx888 running" — then receives no bulk samples for 5 s and exits
+with "No rx888 data for 5 seconds, quitting".
+
+Root cause: ka9q-radio programs the Si5351 ADC clock chip directly
+via raw I2CWFX3 writes (rx888.c:331, rx888.c:340) and intentionally
+never calls STARTADC.  This is a deliberate design choice that works
+against stock RX888 firmware where STARTADC does only Si5351 setup.
+
+SDDC firmware tracks ADC-clock readiness via a separate global flag
+`glAdcClockEnabled` (driver/Si5351.c:55), which is set CyTrue *only*
+inside `si5351aSetFrequencyA(freq>0)` (driver/Si5351.c:250), which
+is called *only* from the STARTADC handler (USBHandler.c:219).  The
+STARTFX3 handler then runs `GpifPreflightCheck()`
+(StartStopApplication.c:99) before starting the GPIF state machine:
+
+    if (!si5351_clk0_enabled())  return CyFalse;  // glAdcClockEnabled
+    if (!si5351_pll_locked())    return CyFalse;
+
+`si5351_clk0_enabled()` returns the bare flag (Si5351.c:174) — it
+does not query the chip — so even though ka9q has correctly
+programmed Si5351 via I2C and the PLL is physically locked, the
+flag remains CyFalse.  STARTFX3 stalls EP0 (USBHandler.c:333), the
+GPIF state machine never starts, no bulk data flows.
+
+Comparison: rx888_stream (the SDDC firmware test harness) sends
+STARTADC immediately before STARTFX3 (rx888_stream.c:1185 / 1193),
+which is what SDDC requires.
+
+Fix: send STARTADC with the configured sample rate just before
+STARTFX3 in `rx888_start_rx()`.  Effects:
+
+  - Reprograms Si5351 to the same frequency ka9q already programmed
+    via I2C — same register sequence, harmless duplicate write.
+  - Sets glAdcClockEnabled = CyTrue inside the firmware.
+  - Firmware blocks for up to 100 ms polling PLL lock; PLL is
+    already locked so this returns immediately.
+  - Subsequent STARTFX3 preflight passes; GPIF starts; samples flow.
+
+The 5 ms usleep after STARTADC matches the existing inter-command
+spacing pattern in rx888_start_rx and gives the firmware's I2C
+transactions a brief settle time before the next command, even
+though STARTADC's 100 ms PLL-lock poll already host-blocks the EP0
+status phase.
+
+Pinned against ka9q-radio commit f78cff9cc8c7fa33ea49aac9176d9263c535a332.
+This patch applies on top of patches 01 and 02 (alphabetical order
+in the Dockerfile patch loop).
+---
+ src/rx888.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/rx888.c b/src/rx888.c
+index 0000000..0000000 100644
+--- a/src/rx888.c
++++ b/src/rx888.c
+@@ -1017,7 +1017,9 @@
+   }
+
+   usleep(5000);
++  command_send(sdr->dev_handle,STARTADC,sdr->frontend->samprate);
++  usleep(5000);
+   command_send(sdr->dev_handle,STARTFX3,0);
+   usleep(5000);
+
+   return 0;

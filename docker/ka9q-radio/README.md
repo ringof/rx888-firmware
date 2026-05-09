@@ -129,7 +129,10 @@ monitor hf.local
 1. **Firmware upload** — ka9q-radio uses its own `ezusb.c` loader
    (same protocol as `rx888_stream -f`)
 2. **Si5351 clock programming** — ka9q programs the Si5351 directly
-   via `I2CWFX3` (bypasses firmware `STARTADC`)
+   via `I2CWFX3`, then sends `STARTADC` (via container patch 03) so
+   the SDDC firmware's `glAdcClockEnabled` flag is set and
+   `STARTFX3`'s preflight check passes.  Without patch 03, STARTFX3
+   stalls and the GPIF state machine never starts.
 3. **GPIF streaming** — `STARTFX3` + async bulk transfers at 64.8 MSPS
 4. **GPIO control** — `GPIOFX3` for dither, randomizer, HF/VHF select
 5. **Attenuator/VGA** — `SETARGFX3` with DAT31_ATT and AD8340_VGA
@@ -140,6 +143,8 @@ monitor hf.local
 See the analysis in the parent repository for details on:
 
 - `TUNERSTDBY` (0xB8) calls that produce harmless STALLs (ka9q-side fix)
+- Missing `STARTADC` before `STARTFX3` — SDDC requires it for GPIF
+  preflight; ka9q omits it (ka9q-side fix in patch 03)
 - GPIO LED bit mapping differences (cosmetic)
 - Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream)
 

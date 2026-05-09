@@ -161,24 +161,78 @@ PLL programming (`docs/architecture.md` §"Frequency setting
 algorithm"); ka9q also sleeps ~1 s host-side around PLL config
 (`rx888.c:400`). Total ~2 s; slower than necessary but not broken.
 
+### 8. Show-stopper: missing `STARTADC` before `STARTFX3` *(ka9q-side)*
+
+ka9q programs the Si5351 directly via raw `I2CWFX3` writes
+(`rx888.c:331`, `rx888.c:340`) and intentionally never calls
+`STARTADC` (the `docker/ka9q-radio/README.md` originally documented
+this as a feature: "bypasses firmware STARTADC").  Against stock
+RX888 firmware where `STARTADC` only does Si5351 setup, this works.
+
+SDDC firmware tracks ADC-clock readiness via a separate global flag
+`glAdcClockEnabled` (`SDDC_FX3/driver/Si5351.c:55`), set `CyTrue`
+*only* inside `si5351aSetFrequencyA(freq>0)`
+(`SDDC_FX3/driver/Si5351.c:250`), called *only* from the `STARTADC`
+handler (`SDDC_FX3/USBHandler.c:219`).  The `STARTFX3` handler then
+runs `GpifPreflightCheck()`
+(`SDDC_FX3/StartStopApplication.c:99`) before starting the GPIF
+state machine:
+
+    if (!si5351_clk0_enabled())  return CyFalse;  // glAdcClockEnabled
+    if (!si5351_pll_locked())    return CyFalse;
+
+`si5351_clk0_enabled()` returns the bare flag
+(`SDDC_FX3/driver/Si5351.c:174`) — it does not query the chip — so
+even though ka9q has correctly programmed Si5351 via I2C and the
+PLL is physically locked, the flag remains `CyFalse`.  `STARTFX3`
+stalls EP0 (`SDDC_FX3/USBHandler.c:333`), GPIF never starts, no
+bulk data flows, and radiod times out:
+
+    rx888 running
+    No rx888 data for 5 seconds, quitting
+
+By comparison, `rx888_stream` (the test harness) sends the commands
+in the order SDDC requires (`rx888_stream.c:1185 / 1193`):
+
+    DAT31_ATT → AD8340_VGA → STARTADC(samprate) → STARTFX3 → ...
+
+Fix: send `STARTADC` with the configured sample rate just before
+`STARTFX3` in `rx888_start_rx()`.  STARTADC reprograms Si5351 to
+the same frequency ka9q already wrote (harmless duplicate), sets
+`glAdcClockEnabled = CyTrue`, polls PLL lock (already locked,
+returns immediately), and `STARTFX3`'s preflight then passes.  See
+`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`.
+
 ## Patches applied in this container
 
 `docker/ka9q-radio/patches/01-poll-reenumeration.patch` — poll
 `libusb_get_device_list` every 200 ms, up to 10 s, for
-`0x04b4:0x00f1` after firmware upload. Replaces `sleep(1)` at
-`rx888.c:700`.
+`0x04b4:0x00f1` after firmware upload, then settle 1 s before
+returning.  Replaces `sleep(1)` at `rx888.c:700`.
 
 `docker/ka9q-radio/patches/02-drop-tunerstdby-hf.patch` — remove
 `TUNERSTDBY` at `rx888.c:943` and `rx888.c:1003`.
 
+`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch` —
+insert `command_send(...,STARTADC,samprate)` before `STARTFX3` in
+`rx888_start_rx` so SDDC's `GpifPreflightCheck()` passes.
+
 The Dockerfile applies them with `git apply --whitespace=nowarn`
-against the pinned SHA. When upstream ka9q-radio merges equivalent
-fixes, bump `KA9Q_RADIO_SHA` and drop the corresponding patch.
+against the pinned SHA, in alphabetical order.  When upstream
+ka9q-radio merges equivalent fixes, bump `KA9Q_RADIO_SHA` and drop
+the corresponding patch.
+
+A bind-mount of `/run/udev:/run/udev:ro` is also required at
+`docker run` time so libusb's hotplug listener inside the container
+sees host udev events; without it the polling patch can never
+observe the re-enumerated device.  See §1 for the analysis.
 
 ## Open work
 
-- Confirm container streams cleanly with both patches applied (this
-  is the validation step for landing this audit).
-- Decide whether to upstream patches A and B to `ka9q/ka9q-radio`.
+- Confirm container streams continuously (>1 minute) with all three
+  patches applied and the udev mount present.  Initial confirmation:
+  container reaches "rx888 running" and starts streaming; long-run
+  stability not yet measured.
+- Decide whether to upstream patches 01–03 to `ka9q/ka9q-radio`.
 - File issues for VHF support (firmware-side R82xx return) and the
   LED bit-position decision; both are non-blocking for HF receive.
