@@ -3,20 +3,23 @@
 # ka9q.sh — helper for the ka9q-radio Docker image.
 #
 # Subcommands:
-#   start                 Launch the container detached.
-#   console               Drop into a bash shell inside the running container.
-#   listen [stream-name]  Resolve the multicast PCM stream via mDNS and play
-#                         with cvlc on the host.  Default: wwv-pcm.local
-#   stop                  Stop the container.
-#   help                  Show this usage.
+#   start                  Launch the container detached.
+#   console                Drop into a bash shell inside the running container.
+#   monitor [stream-name]  Run ka9q's `monitor` inside the container with
+#                          host-side ALSA playback.  Default: wwv-pcm.local
+#   listen  [stream-name]  Fallback: play with cvlc on the host (often fails
+#                          because ka9q uses dynamic RTP payload types VLC
+#                          can't decode without an SDP file).  Default:
+#                          wwv-pcm.local
+#   stop                   Stop the container.
+#   help                   Show this usage.
 #
 # Typical workflow:
 #   ./ka9q.sh start                    # terminal A
-#   ./ka9q.sh listen                   # terminal B  (audio out via VLC)
+#   ./ka9q.sh monitor                  # terminal B  (audio out via ka9q monitor)
 #   ./ka9q.sh console                  # terminal C
-#     # then inside the container:
+#     # inside the container:
 #     control hf.local                 # curses tuner UI
-#     tune hf.local 14.074m            # one-shot tune
 #
 
 set -euo pipefail
@@ -46,11 +49,19 @@ cmd_start() {
         echo "         Firmware upload will fail unless the device is already loaded."
     fi
     mkdir -p "$PROJECT_ROOT/wisdom"
+    # /dev/snd + audio group give the in-container `monitor` access to host
+    # ALSA so audio actually plays.  Harmless on hosts without sound — the
+    # device simply isn't bound and `monitor` falls back to silent operation.
+    local snd_args=()
+    if [ -e /dev/snd ]; then
+        snd_args+=(--device /dev/snd --group-add audio)
+    fi
     docker run --rm -d --name "$CONTAINER_NAME" --privileged \
         -v /dev/bus/usb:/dev/bus/usb \
         -v /run/udev:/run/udev:ro \
         -v "$PROJECT_ROOT/SDDC_FX3:/firmware" \
         -v "$PROJECT_ROOT/wisdom:/var/lib/ka9q-radio" \
+        "${snd_args[@]}" \
         --network host \
         -e FFTW_RIGOR="${FFTW_RIGOR:-measure}" \
         "$IMAGE_NAME" >/dev/null
@@ -64,6 +75,18 @@ cmd_console() {
         exit 1
     fi
     exec docker exec -it "$CONTAINER_NAME" bash
+}
+
+cmd_monitor() {
+    local stream="${1:-wwv-pcm.local}"
+    if ! container_running; then
+        echo "Container '$CONTAINER_NAME' is not running.  Start it with: $0 start" >&2
+        exit 1
+    fi
+    echo "Running ka9q's monitor inside the container.  Ctrl-C to stop."
+    echo "If you hear nothing, check that the container was started with"
+    echo "/dev/snd available on the host (re-run '$0 start' on a host with sound)."
+    exec docker exec -it "$CONTAINER_NAME" monitor "$stream"
 }
 
 cmd_listen() {
@@ -106,6 +129,7 @@ cmd_stop() {
 case "${1:-help}" in
     start)          shift; cmd_start "$@" ;;
     console)        shift; cmd_console "$@" ;;
+    monitor)        shift; cmd_monitor "$@" ;;
     listen)         shift; cmd_listen "$@" ;;
     stop)           shift; cmd_stop "$@" ;;
     help|-h|--help) usage ;;

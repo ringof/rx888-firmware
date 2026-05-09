@@ -99,16 +99,21 @@ and want the most efficient FFT plans.
 ### Tuning and listening (helper script)
 
 `ka9q.sh` (in this directory) wraps the typical operating workflow.
-The container publishes the demodulated audio as RTP/multicast (per
-`radiod`'s standard behavior); the script gives you start / stop /
-shell / listen subcommands without having to remember the long
-`docker run` invocation.
+The container publishes demodulated audio as RTP/multicast (per
+`radiod`'s standard behavior); the helper gives you start / stop /
+console / monitor / listen subcommands without having to remember
+the long `docker run` invocation.
 
 Host-side requirements:
 
 ```
-sudo apt install vlc avahi-utils      # cvlc + avahi-resolve
+sudo apt install avahi-utils alsa-utils    # for mDNS resolve + ALSA
 ```
+
+The `start` subcommand auto-detects `/dev/snd` on the host and
+adds `--device /dev/snd --group-add audio` to the `docker run`
+invocation when present, so the in-container `monitor` can play
+audio through the host's sound card.
 
 Typical session (three terminals):
 
@@ -116,22 +121,23 @@ Typical session (three terminals):
 # Terminal A — launch the container in the background:
 ./ka9q.sh start
 
-# Terminal B — play the demodulated PCM stream via VLC (low-latency):
-./ka9q.sh listen                      # default stream: wwv-pcm.local
+# Terminal B — listen with ka9q's own monitor (recommended):
+./ka9q.sh monitor                     # default stream: wwv-pcm.local
 # or:
-./ka9q.sh listen <other-stream.local>
+./ka9q.sh monitor <other-stream.local>
 
 # Terminal C — drop into the container to operate the radio:
 ./ka9q.sh console
 # inside the container:
 control hf.local                      # curses tuner UI (recommended)
 
-# Or one-shot (requires the channel's SSRC, defined in radiod config —
-# easier to just use `control` above which shows you all channels):
+# Or one-shot from the container shell (requires the channel's SSRC,
+# defined in radiod config — easier to just use `control` above
+# which shows you all channels):
 tune -r hf.local -s <ssrc> -f 14.074m
 ```
 
-`control hf.local` and `tune` resolve `*.local` names via mDNS;
+`control`, `tune`, and `monitor` resolve `*.local` names via mDNS;
 the runtime image installs `libnss-mdns` so glibc's `getaddrinfo`
 asks the in-container avahi-daemon for `.local` lookups.  If
 `Temporary failure in name resolution` appears, the image is from
@@ -139,14 +145,19 @@ before this was added — rebuild with `docker build --no-cache`.
 
 To shut down: `./ka9q.sh stop`.
 
-If `cvlc` doesn't decode the stream cleanly on first try (depends on
-the RTP payload type ka9q-radio publishes), the script prints the
-resolved multicast address — paste it into VLC's GUI as
-`rtp://@<addr>:5004` for diagnostics, or use `monitor` from inside
-the container (`./ka9q.sh console` → `monitor wwv-pcm.local`) which
-is purpose-built for ka9q-radio's stream format.  `monitor` inside
-the container needs ALSA passthrough to play audio; that's beyond
-this helper's scope.
+#### Why `monitor`, not VLC
+
+ka9q-radio publishes RTP audio with **dynamic payload types** (PT
+96+) and no SDP description that VLC will pick up.  VLC opens the
+stream and receives bytes, but cannot decode them — you get
+silence.  `monitor` is part of ka9q-radio itself and understands
+the stream format natively.
+
+The script does provide a `listen` subcommand that runs `cvlc` on
+the host as a fallback, but it usually does not produce audio.
+It is kept for users who want to use VLC's GUI for diagnostics or
+who have already arranged an SDP file for VLC.  Install VLC
+separately if you want it: `sudo apt install vlc`.
 
 ### Interactive shell (for debugging)
 
