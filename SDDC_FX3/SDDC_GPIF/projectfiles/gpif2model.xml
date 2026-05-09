@@ -133,5 +133,8 @@
     <Transition ElementId="TRANSITION3" SourceState="STARTSTATE1" DestinationState="STATE8" Equation="LOGIC_ONE" />
     <Transition ElementId="TRANSITION21" SourceState="STATE5" DestinationState="STATE1" Equation="DMA_RDY_TH0" />
     <Transition ElementId="TRANSITION4" SourceState="STATE2" DestinationState="STATE8" Equation="!FW_TRG" />
+    <Transition ElementId="TRANSITION5" SourceState="STATE7" DestinationState="STATE8" Equation="!FW_TRG" />
+    <Transition ElementId="TRANSITION6" SourceState="STATE6" DestinationState="STATE8" Equation="!FW_TRG" />
+    <Transition ElementId="TRANSITION7" SourceState="STATE1" DestinationState="STATE8" Equation="!FW_TRG" />
   </StateMachine>
 </GPIFIIModel>

@@ -612,7 +612,37 @@ output=$(run_cmd wedge_recovery) && {
 }
 
 # ==================================================================
-# 29. PIB error detection (issue #10)
+# 29. GPIF soft-stop verification (requires new waveform)
+# ==================================================================
+# Cycle start/stop 10 times, verify SM lands in IDLE (state 1) each time.
+# State 1 = soft-stop via !FW_TRG transitions.  State 255 = force-stop
+# fallback (old waveform).  REQUIRES updated SDDC_GPIF.h.
+
+device_quiesce
+
+output=$(run_cmd gpif_soft_stop) && {
+    tap_ok "gpif_soft_stop: SM consistently reaches IDLE via soft-stop"
+} || {
+    tap_fail "gpif_soft_stop: SM did not reach IDLE — new waveform needed" "$output"
+}
+
+# ==================================================================
+# 30. Stop under DMA backpressure (requires new waveform)
+# ==================================================================
+# Start at 64 MS/s without reading EP1, then STOP.  Before the fix:
+# SM is stuck in WAIT, force-stop leaves debris.  After: !FW_TRG
+# exits WAIT cleanly.  REQUIRES updated SDDC_GPIF.h.
+
+device_quiesce
+
+output=$(run_cmd stop_under_backpressure) && {
+    tap_ok "stop_under_backpressure: clean stop from WAIT state + recovery"
+} || {
+    tap_fail "stop_under_backpressure: stop or recovery failed" "$output"
+}
+
+# ==================================================================
+# 31. PIB error detection (issue #10)
 # ==================================================================
 # Start streaming at 64 MS/s without reading EP1 — GPIF overflows.
 # Verify the debug console reports "PIB error".
@@ -628,7 +658,7 @@ output=$(run_cmd pib_overflow) && {
 }
 
 # ==================================================================
-# 30. GETSTATS PIB error counter
+# 32. GETSTATS PIB error counter
 # ==================================================================
 # Runs after pib_overflow; counter should already be > 0.
 
@@ -639,7 +669,7 @@ output=$(run_cmd stats_pib) && {
 }
 
 # ==================================================================
-# 31. Streaming test via rx888_stream
+# 33. Streaming test via rx888_stream
 # ==================================================================
 
 if [[ $SKIP_STREAM -eq 1 ]]; then

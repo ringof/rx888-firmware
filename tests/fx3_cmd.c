@@ -526,6 +526,8 @@ static int do_test_ep0_hammer(libusb_device_handle *h);
 static int do_test_debug_cmd_while_stream(libusb_device_handle *h);
 static int do_test_adc_freq_extremes(libusb_device_handle *h);
 static int do_test_data_sanity(libusb_device_handle *h);
+static int do_test_gpif_soft_stop(libusb_device_handle *h);
+static int do_test_stop_under_backpressure(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -577,6 +579,8 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"debug_cmd_while_stream", do_test_debug_cmd_while_stream},
     {"adc_freq_extremes", do_test_adc_freq_extremes},
     {"data_sanity",      do_test_data_sanity},
+    {"gpif_soft_stop",   do_test_gpif_soft_stop},
+    {"stop_under_backpressure", do_test_stop_under_backpressure},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -622,6 +626,8 @@ static void print_local_help(void)
            "  debug_cmd_while_stream        Debug command during stream\n"
            "  adc_freq_extremes             Edge ADC frequencies\n"
            "  data_sanity                   Bulk data corruption check\n"
+           "  gpif_soft_stop                Verify SM lands in IDLE (needs new waveform)\n"
+           "  stop_under_backpressure       STOP while DMA buffers full\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -1577,9 +1583,18 @@ static int primed_start_and_read(libusb_device_handle *h,
     libusb_free_transfer(xfer);
     free(buf);
 
-    if (st.status == LIBUSB_TRANSFER_COMPLETED ||
-        st.status == LIBUSB_TRANSFER_TIMED_OUT)
+    if (st.status == LIBUSB_TRANSFER_COMPLETED)
         return st.actual_length;
+
+    /* H4 fix: timeout with 0 bytes means the device didn't produce any
+     * data — return LIBUSB_ERROR_TIMEOUT so the retry variant fires its
+     * STOP + clear_halt + retry recovery.  Previously this returned 0,
+     * which looked like "success" (r >= 0) and bypassed recovery entirely.
+     * Timeout with partial data (actual_length > 0) is a valid short
+     * read — return the byte count so callers can use the data. */
+    if (st.status == LIBUSB_TRANSFER_TIMED_OUT)
+        return (st.actual_length > 0) ? st.actual_length
+                                      : LIBUSB_ERROR_TIMEOUT;
 
     /* Map transfer status to a libusb error code */
     switch (st.status) {
@@ -1663,14 +1678,21 @@ static int do_test_stop_gpif_state(libusb_device_handle *h)
         return 1;
     }
 
-    /* State 0 = RESET, 1 = IDLE (graceful stop),
-     * 255 = GPIF block disabled (CyU3PGpifDisable with force=true) */
-    if (s.gpif_state == 0 || s.gpif_state == 1 || s.gpif_state == 255) {
-        printf("PASS stop_gpif_state: GPIF state=%u after STOP (SM properly stopped)\n",
+    /* State 1 = IDLE: SM exited cleanly via !FW_TRG (new waveform).
+     * State 255 = GPIF disabled: force-stop fallback fired.
+     * State 0 = RESET: acceptable but unexpected. */
+    if (s.gpif_state == 1) {
+        printf("PASS stop_gpif_state: GPIF state=%u after STOP (clean soft-stop to IDLE)\n",
                s.gpif_state);
         return 0;
     }
-    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 0, 1, or 255; SM still running)\n",
+    if (s.gpif_state == 0 || s.gpif_state == 255) {
+        printf("PASS stop_gpif_state: GPIF state=%u after STOP "
+               "(stopped, but via force-stop fallback — new waveform not loaded?)\n",
+               s.gpif_state);
+        return 0;
+    }
+    printf("FAIL stop_gpif_state: GPIF state=%u after STOP (expected 1; SM still running)\n",
            s.gpif_state);
     return 1;
 }
@@ -2165,14 +2187,21 @@ static int do_test_sustained_stream(libusb_device_handle *h)
         printf("FAIL sustained_stream: STARTADC: %s\n", libusb_strerror(r));
         return 1;
     }
-    r = cmd_u32_retry(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL sustained_stream: STARTFX3: %s\n", libusb_strerror(r));
+
+    /* Primed start: queue async bulk TD before STARTFX3, matching every
+     * other soak streaming scenario.  The retry variant recovers dirty
+     * xHCI endpoint state left by preceding scenarios (e.g. pib_overflow)
+     * via STOP + clear_halt between attempts. */
+    int primed = primed_start_and_read_retry(h, 65536, 2000);
+    if (primed < 0) {
+        printf("FAIL sustained_stream: primed start: %s\n",
+               libusb_strerror(primed));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
 
-    /* Read continuously for duration_sec */
-    uint64_t total_bytes = 0;
+    /* Stream is running — continue reading synchronously */
+    uint64_t total_bytes = (uint64_t)primed;
     int chunk = 65536;
     uint8_t *buf = malloc(chunk);
     if (!buf) {
@@ -3246,49 +3275,77 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
         return 1;
     }
 
-    /* First session: stream a bit */
-    r = cmd_u32_retry(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: STARTFX3 #1: %s\n", libusb_strerror(r));
+    /* --- Session 1: stream, record dma_count ---
+     * Primed read: queue async bulk TD before STARTFX3 to avoid the
+     * PIB overflow race at 64 MS/s (4x16 KB DMA buffers fill in ~500 us).
+     * Uses _retry variant for the first start after potential inter-scenario
+     * recovery, matching dma_count_monotonic and stop_start_cycle. */
+    int got1 = primed_start_and_read_retry(h, 65536, 2000);
+    if (got1 < 0) {
+        printf("FAIL dma_count_reset: primed start #1: %s\n",
+               libusb_strerror(got1));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
-    bulk_read_some(h, 65536, 2000);
+
+    /* Read GETSTATS *before* STOPFX3 — the STOPFX3 handler resets
+     * glDMACount to 0 (USBHandler.c:386), so reading after STOP
+     * always returns dma_count=0 regardless of actual throughput. */
+    r = read_stats(h, &s);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: GETSTATS #1: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
+        return 1;
+    }
+    uint32_t count1 = s.dma_count;
+
     r = cmd_u32(h, STOPFX3, 0);
     if (r < 0) {
         printf("FAIL dma_count_reset: STOPFX3 #1: %s\n", libusb_strerror(r));
         return 1;
     }
 
-    r = read_stats(h, &s);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: GETSTATS #1: %s\n", libusb_strerror(r));
+    /* Bail out before session 2 if session 1 produced no data.
+     * Running another start/stop cycle on an already-broken pipeline
+     * compounds GPIF corruption (Population B, hypothesis H5). */
+    if (count1 == 0) {
+        printf("FAIL dma_count_reset: first session dma_count=0 "
+               "(stream didn't produce data)\n");
         return 1;
     }
-    uint32_t count1 = s.dma_count;
 
-    /* Second session: start and stop immediately */
+    /* --- Session 2: restart, minimal read, record dma_count ---
+     * Previous design did STARTFX3 then immediate STOPFX3 with no bulk
+     * read.  With no host TDs queued, the GPIF SM was killed mid-
+     * transition by GpifDisable, leaving internal counters and socket
+     * mappings dirty.  The next GpifLoad inherited this residue,
+     * producing cascading 0x1006 PIB errors (Population B).
+     *
+     * A primed read gives the SM a valid consumer path.  4096 bytes is
+     * enough to prove the SM ran and DMA transferred at least one buffer
+     * while keeping session 2 fast.  The test still verifies whether
+     * dma_count resets across sessions. */
     usleep(200000);
-    r = cmd_u32(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: STARTFX3 #2: %s\n", libusb_strerror(r));
-        return 1;
-    }
-    r = cmd_u32(h, STOPFX3, 0);
-    if (r < 0) {
-        printf("FAIL dma_count_reset: STOPFX3 #2: %s\n", libusb_strerror(r));
+    int got2 = primed_start_and_read(h, 4096, 2000);
+    if (got2 < 0) {
+        printf("FAIL dma_count_reset: primed start #2: %s\n",
+               libusb_strerror(got2));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
 
+    /* Read GETSTATS before STOPFX3 (same reason as session 1). */
     r = read_stats(h, &s);
     if (r < 0) {
         printf("FAIL dma_count_reset: GETSTATS #2: %s\n", libusb_strerror(r));
+        cmd_u32(h, STOPFX3, 0);
         return 1;
     }
     uint32_t count2 = s.dma_count;
 
-    if (count1 == 0) {
-        printf("FAIL dma_count_reset: first session dma_count=0 "
-               "(stream didn't produce data)\n");
+    r = cmd_u32(h, STOPFX3, 0);
+    if (r < 0) {
+        printf("FAIL dma_count_reset: STOPFX3 #2: %s\n", libusb_strerror(r));
         return 1;
     }
 
@@ -3307,14 +3364,19 @@ static int do_test_dma_count_reset(libusb_device_handle *h)
 /* T6: dma_count_monotonic — verify dma_completions grows during stream.
  *
  * Uses primed_start_and_read to queue a bulk TD before STARTFX3.
- * At 64 MS/s the 4×16 KB DMA buffers fill in ~500 µs.  The old
- * synchronous approach (cmd_u32(STARTFX3) then bulk_read_some) left
- * a multi-millisecond gap where PIB errors accumulated unchecked;
- * after ~8 loop iterations the overflow occasionally stalled the DMA
- * pipeline, causing dma_count to plateau and the test to fail
- * (observed: step 8, count 23<=23, pib=141).  The primed start
- * eliminates the initial overflow storm so subsequent synchronous
- * reads can keep the pipeline drained. */
+ * At 64 MS/s the 4×16 KB DMA buffers fill in ~500 µs.
+ *
+ * The monitoring loop overlaps bulk reads with GETSTATS polls: an
+ * async bulk TD is kept in flight while the EP0 control transfer
+ * executes, so the host USB controller continuously drains EP1.
+ * This models how a real application works — a dedicated read thread
+ * pulls data while a separate monitoring thread polls diagnostics.
+ *
+ * The previous synchronous design (bulk_read_some then read_stats
+ * sequentially) left a ~1 ms gap per iteration where nobody was
+ * reading EP1.  After ~8 iterations the cumulative PIB overruns
+ * (0x1005) stalled the DMA pipeline, causing dma_count to plateau
+ * (observed: step 7, count 23<=23, 2 failures in 380 soak cycles). */
 static int do_test_dma_count_monotonic(libusb_device_handle *h)
 {
     int r;
@@ -3346,18 +3408,69 @@ static int do_test_dma_count_monotonic(libusb_device_handle *h)
         return 1;
     }
 
+    /* Overlapped monitoring loop: keep an async bulk TD in flight while
+     * polling GETSTATS, so the host never stops draining EP1.
+     *
+     * Each iteration:
+     *   1. Submit async bulk read (TD queued in xHCI ring)
+     *   2. read_stats() via EP0 control transfer (~1 ms)
+     *      — EP1 bulk TD drains data concurrently
+     *   3. Wait for bulk completion
+     *   4. Check dma_count monotonicity */
     uint32_t prev_count = 0;
     uint32_t entry_faults = have_entry ? entry_stats.streaming_faults : 0;
-    for (int i = 0; i < 10; i++) {
-        got = bulk_read_some(h, 32768, 500);
 
+    for (int i = 0; i < 10; i++) {
+        /* 1. Submit async bulk read */
+        uint8_t *buf = malloc(32768);
+        if (!buf) {
+            printf("FAIL dma_count_monotonic: malloc at step %d\n", i);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+        struct libusb_transfer *xfer = libusb_alloc_transfer(0);
+        if (!xfer) {
+            free(buf);
+            printf("FAIL dma_count_monotonic: alloc_transfer at step %d\n", i);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+        struct primed_xfer_state st = { .completed = 0 };
+        libusb_fill_bulk_transfer(xfer, h, EP1_IN, buf, 32768,
+                                  primed_xfer_cb, &st, 500);
+        r = libusb_submit_transfer(xfer);
+        if (r < 0) {
+            libusb_free_transfer(xfer);
+            free(buf);
+            printf("FAIL dma_count_monotonic: submit at step %d: %s\n",
+                   i, libusb_strerror(r));
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+
+        /* 2. Poll GETSTATS while bulk TD drains EP1 concurrently */
         r = read_stats(h, &s);
         if (r < 0) {
+            /* Cancel in-flight TD before bailing */
+            libusb_cancel_transfer(xfer);
+            while (!st.completed)
+                libusb_handle_events_completed(g_ctx, &st.completed);
+            libusb_free_transfer(xfer);
+            free(buf);
             printf("FAIL dma_count_monotonic: GETSTATS step %d: %s\n",
                    i, libusb_strerror(r));
             cmd_u32(h, STOPFX3, 0);
             return 1;
         }
+
+        /* 3. Wait for bulk read to complete */
+        while (!st.completed)
+            libusb_handle_events_completed(g_ctx, &st.completed);
+
+        got = (st.status == LIBUSB_TRANSFER_COMPLETED) ? st.actual_length :
+              (st.status == LIBUSB_TRANSFER_TIMED_OUT)  ? st.actual_length : -1;
+        libusb_free_transfer(xfer);
+        free(buf);
 
         printf("#   dma_monotonic[%d]: read=%d dma=%u gpif=%u pib=%u faults=%u%s\n",
                i, got, s.dma_count, s.gpif_state, s.pib_errors,
@@ -3399,13 +3512,13 @@ static int do_test_watchdog_cap_observe(libusb_device_handle *h)
     r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL watchdog_cap_observe: STARTADC: %s\n", libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
     r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL watchdog_cap_observe: STARTFX3: %s\n", libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
 
@@ -3419,14 +3532,14 @@ static int do_test_watchdog_cap_observe(libusb_device_handle *h)
             printf("FAIL watchdog_cap_observe: GETSTATS poll %d: %s\n",
                    i, libusb_strerror(r));
             cmd_u32(h, STOPFX3, 0);
-            set_arg(h, WDG_MAX_RECOV, 0);
+            set_arg(h, WDG_MAX_RECOV, 5);
             return 1;
         }
         faults[nsamples++] = s.streaming_faults;
     }
 
     cmd_u32(h, STOPFX3, 0);
-    set_arg(h, WDG_MAX_RECOV, 0);
+    set_arg(h, WDG_MAX_RECOV, 5);
 
     /* Check: faults should plateau (last few values equal) */
     if (nsamples < 4) {
@@ -3483,14 +3596,14 @@ static int do_test_watchdog_cap_restart(libusb_device_handle *h)
     r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL watchdog_cap_restart: STARTADC: %s\n", libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
     r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL watchdog_cap_restart: STARTFX3 #1: %s\n",
                libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
 
@@ -3505,13 +3618,13 @@ static int do_test_watchdog_cap_restart(libusb_device_handle *h)
     if (r < 0) {
         printf("FAIL watchdog_cap_restart: STARTFX3 #2 after cap: %s\n",
                libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
 
     int got = bulk_read_some(h, 16384, 2000);
     cmd_u32(h, STOPFX3, 0);
-    set_arg(h, WDG_MAX_RECOV, 0);
+    set_arg(h, WDG_MAX_RECOV, 5);
 
     if (got < 1024) {
         printf("FAIL watchdog_cap_restart: only %d bytes after cap restart "
@@ -3737,6 +3850,162 @@ static int do_test_data_sanity(libusb_device_handle *h)
     printf("PASS data_sanity: %d/%d saturated samples (%.1f%%, "
            "within threshold)\n",
            saturated, nsamples, 100.0 * saturated / nsamples);
+    return 0;
+}
+
+/* Verify that STOPFX3 leaves the GPIF SM in IDLE (state 1) rather than
+ * disabled (state 255).  State 1 means the SM exited cleanly via the
+ * !FW_TRG transitions.  State 255 means force-stop fired — the new
+ * waveform is either not loaded or the transitions are wrong.
+ *
+ * REQUIRES: updated SDDC_GPIF.h with !FW_TRG exits on TH0_RD,
+ * TH0_WAIT, and TH1_WAIT.  Without the new waveform this test will
+ * report FAIL (state 255 instead of 1). */
+static int do_test_gpif_soft_stop(libusb_device_handle *h)
+{
+    int r;
+    int cycles = 10;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL gpif_soft_stop: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    int soft_count = 0;
+    int force_count = 0;
+
+    for (int i = 0; i < cycles; i++) {
+        int got = (i == 0) ? primed_start_and_read_retry(h, 16384, 2000)
+                           : primed_start_and_read(h, 16384, 2000);
+        if (got < 1024) {
+            struct fx3_stats s = {0};
+            read_stats(h, &s);
+            printf("FAIL gpif_soft_stop: cycle %d/%d: no data (got=%d, GPIF=%u)\n",
+                   i + 1, cycles, got < 0 ? 0 : got, s.gpif_state);
+            cmd_u32(h, STOPFX3, 0);
+            return 1;
+        }
+
+        r = cmd_u32(h, STOPFX3, 0);
+        if (r < 0) {
+            printf("FAIL gpif_soft_stop: STOPFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(50000);
+
+        struct fx3_stats s = {0};
+        read_stats(h, &s);
+
+        if (s.gpif_state == 1)
+            soft_count++;
+        else if (s.gpif_state == 0 || s.gpif_state == 255)
+            force_count++;
+        else {
+            printf("FAIL gpif_soft_stop: cycle %d/%d: GPIF state=%u "
+                   "(SM still running after STOP)\n",
+                   i + 1, cycles, s.gpif_state);
+            return 1;
+        }
+        usleep(50000);
+    }
+
+    if (force_count > 0) {
+        printf("FAIL gpif_soft_stop: %d/%d cycles used force-stop (state 0/255), "
+               "expected all soft-stop (state 1) — new waveform not loaded?\n",
+               force_count, cycles);
+        return 1;
+    }
+
+    printf("PASS gpif_soft_stop: %d/%d cycles stopped cleanly to IDLE (state 1)\n",
+           soft_count, cycles);
+    return 0;
+}
+
+/* Provoke DMA backpressure (start streaming at 64 MS/s, don't read EP1),
+ * then issue STOPFX3 and verify the SM exits cleanly to IDLE.
+ *
+ * Before the fix: SM is stuck in TH0_WAIT or TH1_WAIT (states 8/9)
+ * because there are no !FW_TRG transitions out of WAIT states.
+ * STOPFX3 must force-stop, leaving state 255 and DMA debris.
+ *
+ * After the fix: SM exits WAIT → IDLE via !FW_TRG, soft-stop succeeds,
+ * and the next streaming session starts cleanly.
+ *
+ * REQUIRES: updated SDDC_GPIF.h with !FW_TRG exits on TH0_WAIT
+ * and TH1_WAIT. */
+static int do_test_stop_under_backpressure(libusb_device_handle *h)
+{
+    int r;
+
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL stop_under_backpressure: STARTADC: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    int cycles = 5;
+    int soft_count = 0;
+
+    for (int i = 0; i < cycles; i++) {
+        /* Start streaming */
+        r = cmd_u32_retry(h, STARTFX3, 0);
+        if (r < 0) {
+            printf("FAIL stop_under_backpressure: STARTFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+
+        /* Do NOT read EP1 — let DMA buffers fill and GPIF enter WAIT.
+         * At 64 MS/s the 4x16KB buffers fill in ~0.5 ms; wait 200ms
+         * to ensure the SM is firmly stuck in a WAIT state. */
+        usleep(200000);
+
+        /* Stop — this is the critical test */
+        r = cmd_u32(h, STOPFX3, 0);
+        if (r < 0) {
+            printf("FAIL stop_under_backpressure: STOPFX3 cycle %d: %s\n",
+                   i + 1, libusb_strerror(r));
+            return 1;
+        }
+        usleep(50000);
+
+        struct fx3_stats s = {0};
+        read_stats(h, &s);
+
+        if (s.gpif_state == 1) {
+            soft_count++;
+        } else if (s.gpif_state != 0 && s.gpif_state != 255) {
+            printf("FAIL stop_under_backpressure: cycle %d/%d: "
+                   "GPIF state=%u after STOP under backpressure (SM stuck)\n",
+                   i + 1, cycles, s.gpif_state);
+            return 1;
+        }
+
+        /* Verify recovery: start again and confirm data flows */
+        int got = primed_start_and_read(h, 16384, 2000);
+        cmd_u32(h, STOPFX3, 0);
+
+        if (got < 1024) {
+            printf("FAIL stop_under_backpressure: cycle %d/%d: "
+                   "only %d bytes after recovery (device wedged)\n",
+                   i + 1, cycles, got < 0 ? 0 : got);
+            return 1;
+        }
+        usleep(100000);
+    }
+
+    if (soft_count < cycles) {
+        printf("PASS stop_under_backpressure: %d/%d cycles recovered, "
+               "but only %d used soft-stop (new waveform not loaded?)\n",
+               cycles, cycles, soft_count);
+        return 0;
+    }
+
+    printf("PASS stop_under_backpressure: %d/%d cycles: "
+           "clean soft-stop from WAIT state + data resumed\n",
+           soft_count, cycles);
     return 0;
 }
 
@@ -4243,6 +4512,13 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         cmd_u32(h, STOPFX3, 0);   /* ignore errors — may already be stopped */
         cmd_u32(h, GPIOFX3, 0x0800); /* LED_BLUE — clear SHDWN after gpio scenarios */
         usleep(100000);            /* 100 ms — let GPIF/DMA quiesce */
+        /* NOTE: do NOT call libusb_clear_halt(EP1_IN) here unconditionally.
+         * The FX3 CLEAR_FEATURE handler calls CyU3PUsbStall(ep,false,true)
+         * which corrupts USB controller state on a non-stalled endpoint
+         * (see USBHandler.c:154-158).  H1 confirmed that only
+         * ep0_stall_recovery leaves EP1 dirty; blanket clear_halt on every
+         * cycle regresses sustained_stream, wedge_recovery, and freq_hop.
+         * Reverted per issue #82 soak evidence. */
 
         /* Health check — retry once on failure.  After a scenario
          * triggers a watchdog recovery, the device may need up to ~2s

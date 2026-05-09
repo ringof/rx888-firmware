@@ -334,7 +334,14 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 				}
-				CyU3PGpifDisable(CyTrue);   /* force-stop SM in case it's stuck */
+				/* Stop any running SM before restart.  Always use
+				 * CyTrue (force-reload) here because StartGPIF()
+				 * calls CyU3PGpifLoad() which reloads the config
+				 * anyway — CyFalse offers no benefit and crashed
+				 * the device when the SM wasn't in IDLE (no sleep
+				 * in this path, unlike STOPFX3). */
+				CyU3PGpifControlSWInput(CyFalse);
+				CyU3PGpifDisable(CyTrue);
 				CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
 				CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);  /* reclaim USB-side DMA descriptors
 				    * left by the previous session; without this, zombie descriptors
@@ -375,13 +382,26 @@ CyFxSlFifoApplnUSBSetupCB (
 			case STOPFX3:
 					CyU3PUsbLPMEnable();
 				    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
-					CyU3PGpifControlSWInput(CyFalse);  /* deassert FW_TRG before disable */
-					CyU3PGpifDisable(CyTrue);   /* force-stop GPIF SM immediately */
-					/* Do NOT call CyU3PGpifLoad() here — it re-enables the GPIF
-					 * block, causing the SM to auto-advance.  STARTFX3 will reload
-					 * the waveform via StartGPIF() when streaming resumes. */
+					/* Soft-stop: deassert FW_TRG so the GPIF SM exits to IDLE
+					 * via the !FW_TRG transitions added in SDDC_GPIF.h.
+					 * REQUIRES the updated waveform with !FW_TRG exits on
+					 * TH0_RD, TH0_WAIT, and TH1_WAIT states.  Without
+					 * the new waveform, the SM will hang in WAIT states
+					 * and the soft-stop below will fail. */
+					CyU3PGpifControlSWInput(CyFalse);
+					CyU3PThreadSleep(1);  /* SM reaches IDLE within 3 clocks;
+					                       * sleep 1 ms for DMA quiesce */
+					{
+						uint8_t smState = 0xFF;
+						CyU3PGpifGetSMState(&smState);
+						if (smState == 1 /* IDLE */) {
+							CyU3PGpifDisable(CyFalse);
+						} else {
+							DebugPrint(4, "\r\nSTP soft-stop fail SM=%d, forcing", smState);
+							CyU3PGpifDisable(CyTrue);
+						}
+					}
 					CyU3PDmaMultiChannelReset (&glMultiChHandleSlFifoPtoU);
-					CyU3PThreadSleep(1);  /* let DMA controller quiesce before next STARTFX3 */
 					CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
 					glDMACount = 0;  /* prevent watchdog false-positive on stale count */
 					glWdgRecoveryCount = 0;  /* reset recovery cap */

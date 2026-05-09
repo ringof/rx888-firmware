@@ -206,34 +206,28 @@ implemented.  They are documented here as design notes for reference.
 These require changes to the GPIF state machine (via GPIF II Designer)
 and are more invasive than the polling approaches above.
 
-#### 6. GPIF state machine redesign — add `!FW_TRG` exit transitions
+#### 6. GPIF state machine redesign — `!FW_TRG` exit transitions
 
-**Status: actively planned — see `PLAN-gpif-clean-stop.md`.**
+**Status: implemented.**  See
+[gpif-and-recovery.md](gpif-and-recovery.md) for the full design.
 
-The current SM has a critical asymmetry: only the TH1_RD state (6)
-has a `!FW_TRG → IDLE` transition, meaning the SM can only cleanly
-stop when it happens to be in that one state.  If the SM is in
-TH0_RD, TH0_WAIT, or TH1_WAIT when `FW_TRG` is de-asserted, there
-is no clean exit path.  This forces every STOPFX3 and watchdog
-recovery to use `CyU3PGpifDisable(CyTrue)` (force-stop), which kills
-the SM mid-transaction and can corrupt DMA state.
+The original SM had a critical asymmetry: only TH1_RD (state 6) had
+a `!FW_TRG → IDLE` transition.  Three additional `!FW_TRG → IDLE`
+transitions were added to states that each had one free transition
+slot:
 
-The planned fix adds `!FW_TRG → IDLE` transitions to three states
-that each have exactly one free transition slot:
-
-| State | Current transitions | Add |
-|-------|-------------------|-----|
+| State | Existing transition | Added |
+|-------|-------------------|-------|
 | TH0_RD (2) | `DATA_CNT_HIT → TH1_RD_LD` | `!FW_TRG → IDLE` |
 | TH0_WAIT (9) | `DMA_RDY_TH0 → TH0_RD_LD` | `!FW_TRG → IDLE` |
 | TH1_WAIT (8) | `DMA_RDY_TH1 → TH1_RD_LD` | `!FW_TRG → IDLE` |
 
-With these transitions, de-asserting `FW_TRG` guarantees the SM
-reaches IDLE within 3 clock cycles (~47 ns at 64 MHz) from any
-active state.  This enables `CyU3PGpifDisable(CyFalse)` (soft-stop)
-for clean shutdown.
-
-This requires regenerating `SDDC_GPIF.h` via GPIF II Designer and
-validation against the hardware.
+De-asserting FW_TRG now guarantees the SM reaches IDLE within 3 clock
+cycles (~47 ns at 64 MHz) from any active state.  STOPFX3 and the
+watchdog use `CyU3PGpifDisable(CyFalse)` (soft-stop) when the SM
+reaches IDLE, falling back to `CyU3PGpifDisable(CyTrue)` only when the
+external clock is dead.  Soak testing (500+ cycles) confirmed zero
+device crashes with this architecture.
 
 ---
 
@@ -248,7 +242,7 @@ polling loop.  The detection and recovery sequence is:
 graph TD
     POLL["Every 100 ms<br/>(while glIsApplnActive)"] --> CMP{glDMACount<br/>advanced?}
 
-    CMP -->|Yes| HEALTHY[Clear stall counter<br/>Update previous count<br/>Reset glWdgRecoveryCount]
+    CMP -->|Yes| HEALTHY[Clear stall counter<br/>Update previous count]
 
     CMP -->|"No (== prev, prev > 0)"| SM{GPIF SM state?}
 
@@ -316,10 +310,9 @@ The host is informed of watchdog recovery events through:
 | **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | **Done** (`RunApplication.c:226-228`) | 100-300 ms (polling) |
 | **5** | Si5351 PLL lock check during recovery | **Done** (`RunApplication.c:262`) | 300 ms (after 3 stall polls) |
 | **5b** | Watchdog recovery cap (`glWdgMaxRecovery`) | **Done** (`RunApplication.c:235-240`) | N/A (limit, not detection) |
-| **6** | Add `!FW_TRG → IDLE` transitions to GPIF SM | **Planned** (`PLAN-gpif-clean-stop.md`) | <1 clock (~16 ns) |
+| **6** | Add `!FW_TRG → IDLE` transitions to GPIF SM | **Done** (`SDDC_GPIF.h`, see [gpif-and-recovery.md](gpif-and-recovery.md)) | <1 clock (~16 ns) |
 
-Priorities 1-5 are implemented.  The silent wedge is now a
-detected-and-recovered condition.  Priority 6 (adding `!FW_TRG`
-clean-stop transitions) is actively planned and would enable reliable
-soft-stop via `CyU3PGpifDisable(CyFalse)`.  See
-`PLAN-gpif-clean-stop.md` for the full transition analysis.
+All priorities are implemented.  The silent wedge is now a
+detected-and-recovered condition.  Priority 6 (soft-stop via
+`CyU3PGpifDisable(CyFalse)`) was validated with 500+ soak test
+cycles at zero device crashes.

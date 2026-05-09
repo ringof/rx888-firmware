@@ -248,13 +248,27 @@ void ApplicationThread ( uint32_t input)
 									glWdgRecoveryCount++;
 									DebugPrint(4, "\r\nWDG: === RECOVERY START === SM=%d DMA=%u recov=%d/%d",
 										gpifState, curDMA, glWdgRecoveryCount, glWdgMaxRecovery);
+									/* Soft-stop: deassert FW_TRG so the SM exits
+									 * to IDLE via !FW_TRG transitions.
+									 * REQUIRES updated SDDC_GPIF.h waveform with
+									 * !FW_TRG exits on TH0_RD, TH0_WAIT, TH1_WAIT.
+									 *
+									 * Caveat: soft-stop needs the external clock
+									 * to advance the SM.  If the Si5351 is dead
+									 * or PLL unlocked, the SM can't transition
+									 * and soft-stop fails — fall back to force. */
 									CyU3PGpifControlSWInput(CyFalse);
-
-									/* Force-stop (CyTrue): soft-stop requires clock
-									 * edges from the ADC, which may not be present
-									 * during a watchdog recovery (e.g. Si5351 disabled
-									 * or PLL unlocked).  Force-stop is unconditional. */
-									CyU3PGpifDisable(CyTrue);
+									CyU3PThreadSleep(1);
+									{
+										uint8_t smState = 0xFF;
+										CyU3PGpifGetSMState(&smState);
+										if (smState == 1 /* IDLE */) {
+											CyU3PGpifDisable(CyFalse);
+										} else {
+											DebugPrint(4, "\r\nWDG: soft-stop fail SM=%d, forcing", smState);
+											CyU3PGpifDisable(CyTrue);
+										}
+									}
 
 									rc_reset = CyU3PDmaMultiChannelReset(&glMultiChHandleSlFifoPtoU);
 									rc_flush = CyU3PUsbFlushEp(CY_FX_EP_CONSUMER);
@@ -293,7 +307,6 @@ void ApplicationThread ( uint32_t input)
 							DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
 								prevDMACount, curDMA);
 						stallCount = 0;
-						glWdgRecoveryCount = 0;
 						prevDMACount = curDMA;
 					}
 				}
