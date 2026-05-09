@@ -10,6 +10,39 @@ Docker container for testing SDDC_FX3 firmware compatibility with
 docker build -t ka9q-radio docker/ka9q-radio/
 ```
 
+## Find your USB device
+
+`/dev/bus/usb` is the Linux usbfs tree. To confirm the RX888mk2 is
+visible to the host before mounting it into the container:
+
+```
+# List all USB devices; look for Cypress FX3
+lsusb
+
+# Filter to Cypress IDs:
+#   04b4:00f3  -> FX3 boot loader (no firmware loaded)
+#   04b4:00f1  -> SDDC firmware running
+lsusb -d 04b4:
+```
+
+Example output:
+
+```
+Bus 002 Device 014: ID 04b4:00f3 Cypress Semiconductor Corp. CYUSB3013/CYUSB3014
+```
+
+The corresponding device node is `/dev/bus/usb/<bus>/<device>` —
+`/dev/bus/usb/002/014` in the example. Mounting all of `/dev/bus/usb`
+into the container (as the `docker run` examples below do) lets the
+container see the device even when its bus/device path changes after
+firmware upload (PID flips `0x00f3` → `0x00f1`, which usually
+re-enumerates).
+
+If `lsusb` shows nothing for `04b4:`, the host isn't seeing the
+device — fix that first (cable, USB 3.0 port, power) before bothering
+with Docker. macOS and Windows do not expose `/dev/bus/usb`; this
+container is Linux-only.
+
 ## Run
 
 ### With firmware already loaded on the device
