@@ -51,7 +51,7 @@ RUN make -C src -j$(nproc) \
     ENABLE_SDRPLAY=0 \
     ENABLE_SIG_GEN=1 \
     ARCHOPTS="" \
-    radiod rx888.so control tune monitor
+    radiod rx888.so sig_gen.so control tune monitor
 
 # ---- Runtime image ----
 FROM debian:bookworm-slim
