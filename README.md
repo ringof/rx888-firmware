@@ -53,6 +53,23 @@ cd tests && make
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
 ```
 
+### USB device permissions
+
+The FX3 USB device must be accessible to the user running the tests.
+Install the udev rules from the
+[rx888_tools](https://github.com/ringof/rx888_tools) submodule and
+reload:
+
+```
+sudo cp tests/rx888_tools/udev/99-rx888.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+This grants read/write access to both the bootloader (PID `00f3`) and
+programmed (PID `00f1`) device endpoints.  Without these rules,
+`rx888_stream` and `fx3_cmd` will fail with `LIBUSB_ERROR_ACCESS`
+unless run as root.
+
 ### USB buffer memory
 
 The streaming test submits many large USB transfers concurrently. Linux
