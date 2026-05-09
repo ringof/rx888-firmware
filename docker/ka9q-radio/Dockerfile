@@ -30,11 +30,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone ka9q-radio — only need radiod + rx888 plugin
+# Clone ka9q-radio — only need radiod + rx888 plugin.
+# Pin to a specific commit so audit results are reproducible. Bump
+# this SHA when intentionally retesting against newer ka9q-radio.
+ARG KA9Q_RADIO_SHA=f78cff9cc8c7fa33ea49aac9176d9263c535a332
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/ka9q/ka9q-radio.git
+RUN git clone https://github.com/ka9q/ka9q-radio.git \
+    && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
 
 WORKDIR /build/ka9q-radio
+
+# Apply local compatibility patches against the pinned SHA.
+# See docker/ka9q-radio/patches/README.md and docs/ka9q-compat-audit.md.
+COPY patches/*.patch /tmp/patches/
+RUN for p in /tmp/patches/*.patch; do \
+        echo "Applying $p"; \
+        git apply --whitespace=nowarn "$p"; \
+    done
 
 # Build only what we need: radiod core + rx888.so plugin + control utility
 # Disable all other SDR hardware to avoid pulling in unnecessary -dev packages
