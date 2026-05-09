@@ -96,6 +96,49 @@ Pass it with `-e FFTW_RIGOR=<value>` on `docker run`, e.g.
 `-e FFTW_RIGOR=patient` if you intend to operate the radio long-term
 and want the most efficient FFT plans.
 
+### Tuning and listening (helper script)
+
+`ka9q.sh` (in this directory) wraps the typical operating workflow.
+The container publishes the demodulated audio as RTP/multicast (per
+`radiod`'s standard behavior); the script gives you start / stop /
+shell / listen subcommands without having to remember the long
+`docker run` invocation.
+
+Host-side requirements:
+
+```
+sudo apt install vlc avahi-utils      # cvlc + avahi-resolve
+```
+
+Typical session (three terminals):
+
+```
+# Terminal A — launch the container in the background:
+./ka9q.sh start
+
+# Terminal B — play the demodulated PCM stream via VLC (low-latency):
+./ka9q.sh listen                      # default stream: wwv-pcm.local
+# or:
+./ka9q.sh listen <other-stream.local>
+
+# Terminal C — drop into the container to operate the radio:
+./ka9q.sh console
+# inside the container:
+control hf.local                      # curses tuner UI
+tune    hf.local 14.074m              # one-shot tune
+```
+
+To shut down: `./ka9q.sh stop`.
+
+If `cvlc` doesn't decode the stream cleanly on first try (depends on
+the RTP payload type ka9q-radio publishes), the script prints the
+resolved multicast address — paste it into VLC's GUI as
+`rtp://@<addr>:5004` for diagnostics, or use `monitor` from inside
+the container (`./ka9q.sh console` → `monitor wwv-pcm.local`) which
+is purpose-built for ka9q-radio's stream format.  `monitor` inside
+the container needs ALSA passthrough to play audio; that's beyond
+this helper's scope.
+
 ### Interactive shell (for debugging)
 
 ```
