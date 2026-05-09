@@ -25,7 +25,7 @@ elif lsusb -d 04b4:00f3 > /dev/null 2>&1; then
     echo "RX888 found (bootloader, PID 0x00F3) — radiod will upload firmware"
 else
     echo "WARNING: No RX888 detected on USB bus"
-    echo "Make sure to run with: --privileged -v /dev/bus/usb:/dev/bus/usb"
+    echo "Make sure to run with: --privileged -v /dev/bus/usb:/dev/bus/usb -v /run/udev:/run/udev:ro"
 fi
 
 # Pre-generate FFTW wisdom on first run.  Wisdom is CPU-specific

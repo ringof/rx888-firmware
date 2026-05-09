@@ -50,6 +50,7 @@ container is Linux-only.
 ```
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
+  -v /run/udev:/run/udev:ro \
   --network host \
   ka9q-radio
 ```
@@ -59,11 +60,22 @@ docker run --rm -it --privileged \
 ```
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
+  -v /run/udev:/run/udev:ro \
   -v $(pwd)/SDDC_FX3:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   --network host \
   ka9q-radio
 ```
+
+The `/run/udev` bind mount is **required** when radiod uploads the
+firmware: after the FX3 re-enumerates from `04b4:00f3` (DFU) to
+`04b4:00f1` (loaded), libusb inside the container needs to see the
+new device.  libusb's hotplug listener subscribes to systemd-udevd
+events; udevd does not run inside the container, so without this
+mount libusb returns a stale device list forever and radiod exits
+with "Error or device could not be found".  The mount is harmless
+(read-only) for the firmware-already-loaded case, so it is shown in
+both examples.
 
 The `wisdom` bind mount persists FFTW wisdom across runs.  On first
 run the entrypoint generates wisdom for the host CPU (FFTW wisdom is
@@ -89,6 +101,7 @@ and want the most efficient FFT plans.
 ```
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
+  -v /run/udev:/run/udev:ro \
   -v $(pwd)/SDDC_FX3:/firmware \
   --network host \
   ka9q-radio bash

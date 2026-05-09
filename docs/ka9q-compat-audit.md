@@ -79,20 +79,34 @@ The user-observed log shows zero "found rx888 vendor 04b4, device
 re-appeared. **This is the immediate cause of `device setup returned
 -1`.**
 
-Fix: poll for the loaded PID for ~10 s, **then sleep 1 s** before
-returning. The settle delay is non-obvious but necessary: under
-Docker on Linux, even after the loaded PID first appears in
-`libusb_get_device_list()`, the kernel's SuperSpeed enumeration
-(config selection + U1/U2 LPM enable) is still in flight for several
-hundred milliseconds, and udev's libusb-side device-list refresh
-lags further.  Without the settle delay, the upstream rescan at
-`rx888.c:717` returns a stale list missing `04b4:00f1` and
-`rx888_usb_init()` still exits with "Error or device could not be
-found".  Verified by `usbmon` capture: kernel's last setup URBs
-(`SET_FEATURE U1_ENABLE`/`U2_ENABLE`) land ~3 ms after first
-appearance, but the upstream rescan races the udev refresh and
-returns an empty match.  See
-`docker/ka9q-radio/patches/01-poll-reenumeration.patch`.
+Fix (two parts, both required under Docker):
+
+1. **Container side: bind-mount `/run/udev:/run/udev:ro`** when running
+   the container.  libusb 1.0.26's hotplug listener subscribes to
+   systemd-udevd's filtered netlink events; udevd does not run inside
+   the container, so without this mount libusb's cached device list
+   never updates and `libusb_get_device_list()` keeps returning a
+   stale list that includes the dead bootloader and excludes the
+   loaded device.  Verified by `LIBUSB_DEBUG=4`: the polling loop ran
+   all 50 iterations seeing the same 8 cached devices, never
+   observing the re-enumerated `04b4:00f1`, even though the host
+   kernel had it fully enumerated (per `usbmon` and host-side
+   `lsusb`).  This was the actual original cause of "Error or device
+   could not be found" — not the timing race we initially suspected.
+
+2. **ka9q side: poll for the loaded PID for ~10 s, then sleep 1 s**
+   before returning, instead of the upstream `sleep(1)`.  This is a
+   secondary defence: with the udev mount in place, hotplug events
+   propagate within ~1 s, and the polling loop typically breaks out
+   in the first iteration; the 1 s settle delay then covers any
+   residual lag in the kernel's SuperSpeed enumeration (config
+   selection + U1/U2 LPM enable) before the upstream rescan at
+   `rx888.c:717` runs.  See
+   `docker/ka9q-radio/patches/01-poll-reenumeration.patch`.
+
+Without (1) the patch alone is insufficient — the polling can never
+observe the re-enumerated device.  Without (2) the upstream's bare
+`sleep(1)` is fragile across hosts even when udev events do arrive.
 
 ### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, non-fatal)*
 

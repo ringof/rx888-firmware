@@ -161,6 +161,7 @@ ka9q-radio's multicast output).
 docker build -t ka9q-radio docker/ka9q-radio/
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
+  -v /run/udev:/run/udev:ro \
   -v $(pwd)/SDDC_FX3:/firmware \
   -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   --network host \
