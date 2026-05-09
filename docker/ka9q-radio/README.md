@@ -184,6 +184,11 @@ separately if you want it: `sudo apt install vlc`.
 
 ### Interactive shell (for debugging)
 
+For day-to-day operation, use the `ka9q.sh` helper script
+documented above.  This section is for debugging the image itself
+(checking USB visibility, running `radiod` by hand, inspecting
+binaries, etc.) — it deliberately omits audio passthrough.
+
 ```
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
@@ -199,15 +204,20 @@ Then inside the container:
 # Check USB device
 lsusb -d 04b4:
 
-# Run radiod manually
+# Run radiod manually (instead of the entrypoint's CMD):
 radiod /etc/radio/radiod@rx888-test.conf
 
-# In another terminal (docker exec):
-# Tune to a frequency
-tune hf.local 14.074m
+# From another terminal — docker exec into the same container — you can
+# operate the receiver while radiod runs in the foreground here:
+control hf.local                            # curses tuner UI
 
-# Monitor status
-monitor hf.local
+# Or one-shot tune (need the channel's SSRC from the radiod config):
+tune -r hf.local -s <ssrc> -f 14.074m
+
+# `monitor` will run but produce no audio in this debug invocation
+# because /dev/snd is not passed through.  Use the helper script's
+# `monitor` subcommand for actual audio output.
+monitor wwv-pcm.local
 ```
 
 ## What this tests
