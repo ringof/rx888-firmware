@@ -79,7 +79,19 @@ The user-observed log shows zero "found rx888 vendor 04b4, device
 re-appeared. **This is the immediate cause of `device setup returned
 -1`.**
 
-Fix: poll for the loaded PID for ~10 s. See
+Fix: poll for the loaded PID for ~10 s, **then sleep 1 s** before
+returning. The settle delay is non-obvious but necessary: under
+Docker on Linux, even after the loaded PID first appears in
+`libusb_get_device_list()`, the kernel's SuperSpeed enumeration
+(config selection + U1/U2 LPM enable) is still in flight for several
+hundred milliseconds, and udev's libusb-side device-list refresh
+lags further.  Without the settle delay, the upstream rescan at
+`rx888.c:717` returns a stale list missing `04b4:00f1` and
+`rx888_usb_init()` still exits with "Error or device could not be
+found".  Verified by `usbmon` capture: kernel's last setup URBs
+(`SET_FEATURE U1_ENABLE`/`U2_ENABLE`) land ~3 ms after first
+appearance, but the upstream rescan races the udev refresh and
+returns an empty match.  See
 `docker/ka9q-radio/patches/01-poll-reenumeration.patch`.
 
 ### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, non-fatal)*
