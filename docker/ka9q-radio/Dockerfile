@@ -27,13 +27,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     libogg-dev \
     libsamplerate-dev \
+    portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone ka9q-radio — only need radiod + rx888 plugin
+# Clone ka9q-radio — only need radiod + rx888 plugin.
+# Pin to a specific commit so audit results are reproducible. Bump
+# this SHA when intentionally retesting against newer ka9q-radio.
+ARG KA9Q_RADIO_SHA=f78cff9cc8c7fa33ea49aac9176d9263c535a332
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/ka9q/ka9q-radio.git
+RUN git clone https://github.com/ka9q/ka9q-radio.git \
+    && git -C ka9q-radio checkout "${KA9Q_RADIO_SHA}"
 
 WORKDIR /build/ka9q-radio
+
+# Apply local compatibility patches against the pinned SHA.
+# See docker/ka9q-radio/patches/README.md and docs/ka9q-compat-audit.md.
+COPY patches/*.patch /tmp/patches/
+RUN for p in /tmp/patches/*.patch; do \
+        echo "Applying $p"; \
+        git apply --whitespace=nowarn "$p"; \
+    done
 
 # Build only what we need: radiod core + rx888.so plugin + control utility
 # Disable all other SDR hardware to avoid pulling in unnecessary -dev packages
@@ -50,7 +63,7 @@ RUN make -C src -j$(nproc) \
     ENABLE_SDRPLAY=0 \
     ENABLE_SIG_GEN=1 \
     ARCHOPTS="" \
-    radiod rx888.so control tune monitor
+    radiod rx888.so sig_gen.so control tune monitor
 
 # ---- Runtime image ----
 FROM debian:bookworm-slim
@@ -67,7 +80,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libusb-1.0-0 \
     libogg0 \
     libsamplerate0 \
+    libportaudio2 \
+    libfftw3-bin \
     avahi-daemon \
+    avahi-utils \
+    libnss-mdns \
     dbus \
     procps \
     usbutils \
@@ -82,18 +99,18 @@ COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 
 # Create plugin directory and config directory
-RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio
+RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio /usr/local/share/ka9q-radio
+
+# Install ka9q-radio share files (presets.conf, bandplan.txt, help.txt, etc.)
+# radiod loads /usr/local/share/ka9q-radio/presets.conf at startup.
+COPY --from=builder /build/ka9q-radio/share/ /usr/local/share/ka9q-radio/
 
 # Install minimal rx888 config for HF direct-sampling test
 COPY rx888-test.conf /etc/radio/radiod@rx888-test.conf
-
-# Copy firmware image if present (can also bind-mount at runtime)
-# The SDDC_FX3.img goes in the working directory or /usr/local/share/ka9q-radio/
-RUN mkdir -p /usr/local/share/ka9q-radio
 
 # Copy entrypoint
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["radiod", "-f", "/etc/radio/radiod@rx888-test.conf"]
+CMD ["radiod", "/etc/radio/radiod@rx888-test.conf"]
