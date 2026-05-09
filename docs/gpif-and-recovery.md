@@ -412,6 +412,26 @@ The two remaining failure scenarios (`abandoned_stream`,
 `watchdog_cap_observe`) were caused by a test harness bug that
 disabled the watchdog recovery cap, not a firmware issue.
 
+### Running the soak test
+
+The soak test requires an RX888mk2 connected via USB with firmware
+loaded.  Build the test tools, then run:
+
+```
+cd tests && make
+sudo ./fx3_cmd soak 1 20
+```
+
+Arguments: `soak [hours] [seed] [max_scenarios]`.  The default is 1
+hour with a random seed.  `seed 20` is the baseline used for the
+before/after comparison above.  The test runs 39 weighted-random
+scenarios in a loop, with a health check (TESTFX3 + GETSTATS) between
+each one.  Press Ctrl-C for an early summary.
+
+The 1-hour soak with seed 20 passed with **zero device crashes** and
+**100% health-check pass rate** across 500+ cycles on the current
+firmware.
+
 ---
 
 ## Source file reference
