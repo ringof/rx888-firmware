@@ -140,13 +140,24 @@ monitor hf.local
 
 ## Known compatibility notes
 
-See the analysis in the parent repository for details on:
+See `docs/ka9q-compat-audit.md` in the parent repository for the
+full analysis.  Summary:
 
-- `TUNERSTDBY` (0xB8) calls that produce harmless STALLs (ka9q-side fix)
-- Missing `STARTADC` before `STARTFX3` — SDDC requires it for GPIF
-  preflight; ka9q omits it (ka9q-side fix in patch 03)
-- GPIO LED bit mapping differences (cosmetic)
-- Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream)
+- **Missing `STARTADC` before `STARTFX3`** — SDDC requires it for
+  the GPIF preflight check; ka9q omits it.  Fixed by container
+  patch 03 (`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`).
+  The single ka9q-side change required for streaming to work.
+- **`/run/udev` bind-mount required** at `docker run` time — libusb
+  inside the container needs host udev events to see the FX3
+  re-enumerate after firmware upload.  Container-side workaround,
+  no patch.
+- `sleep(1)` after firmware upload (`rx888.c:700`) — fragile in
+  principle, sufficient on observed hardware with the udev mount.
+  Documented in audit §1, no patch.
+- `TUNERSTDBY` (0xB8) calls produce harmless STALLs.  Cosmetic
+  noise, no functional impact.  Documented in audit §2, no patch.
+- GPIO LED bit-mapping differences (cosmetic).
+- Missing `libusb_clear_halt()` in ka9q (xHCI fix needed upstream).
 
 ## Requirements
 

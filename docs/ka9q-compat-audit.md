@@ -59,7 +59,7 @@ SDDC firmware `docs/architecture.md` §"Command table" and
 
 ## Findings
 
-### 1. Show-stopper: 1 s re-enumeration timeout *(ka9q-side)*
+### 1. `sleep(1)` after firmware upload *(ka9q-side, documented; no patch)*
 
 `src/rx888.c:700`:
 
@@ -70,55 +70,47 @@ sleep(1); // how long should this be?
 After firmware upload, ka9q sleeps once for one second, then performs
 a **single** scan for `0x04b4:0x00f1` and returns "Error or device
 could not be found" if absent (`rx888.c:803–804`). The author's own
-comment flags the value as a guess. FX3 boot + udev settle on Linux
-can easily exceed 1 s, more so under Docker bind-mounted
-`/dev/bus/usb`.
+comment flags the value as a guess.
 
-The user-observed log shows zero "found rx888 vendor 04b4, device
-00f1" lines, confirming the second scan ran before the device
-re-appeared. **This is the immediate cause of `device setup returned
--1`.**
+Original misdiagnosis: this was *thought* to be the cause of the
+container's "Error or device could not be found" failure.  It was
+not.  The actual cause was that libusb 1.0.26's hotplug listener
+subscribes to systemd-udevd's filtered netlink events, and udevd
+does not run inside the container, so libusb's cached device list
+never updates and `libusb_get_device_list()` keeps returning a stale
+list — even after a 10 s polling loop.  `LIBUSB_DEBUG=4` confirmed
+the polling loop ran all 50 iterations seeing the same 8 cached
+devices, never observing the re-enumerated `04b4:00f1`, even though
+the host kernel had it fully enumerated (per `usbmon` and host-side
+`lsusb`).
 
-Fix (two parts, both required under Docker):
+Fix: at `docker run` time, bind-mount `/run/udev:/run/udev:ro` so
+libusb's udev backend can see host udev events.  With that mount in
+place, the kernel finishes SuperSpeed enumeration ~430 ms after the
+last firmware byte is acked (per `usbmon`), and the upstream
+`sleep(1)` + single rescan succeeds reliably.  Verified working on
+the project's reference hardware.
 
-1. **Container side: bind-mount `/run/udev:/run/udev:ro`** when running
-   the container.  libusb 1.0.26's hotplug listener subscribes to
-   systemd-udevd's filtered netlink events; udevd does not run inside
-   the container, so without this mount libusb's cached device list
-   never updates and `libusb_get_device_list()` keeps returning a
-   stale list that includes the dead bootloader and excludes the
-   loaded device.  Verified by `LIBUSB_DEBUG=4`: the polling loop ran
-   all 50 iterations seeing the same 8 cached devices, never
-   observing the re-enumerated `04b4:00f1`, even though the host
-   kernel had it fully enumerated (per `usbmon` and host-side
-   `lsusb`).  This was the actual original cause of "Error or device
-   could not be found" — not the timing race we initially suspected.
+A polling-with-timeout pattern in `rx888.c:700` would be more robust
+on pathologically slow hosts, but it is not required for SDDC
+streaming to work, so we do not patch it — the cost of a
+not-strictly-necessary upstream ask outweighs the benefit on
+hypothetical hardware.
 
-2. **ka9q side: poll for the loaded PID for ~10 s, then sleep 1 s**
-   before returning, instead of the upstream `sleep(1)`.  This is a
-   secondary defence: with the udev mount in place, hotplug events
-   propagate within ~1 s, and the polling loop typically breaks out
-   in the first iteration; the 1 s settle delay then covers any
-   residual lag in the kernel's SuperSpeed enumeration (config
-   selection + U1/U2 LPM enable) before the upstream rescan at
-   `rx888.c:717` runs.  See
-   `docker/ka9q-radio/patches/01-poll-reenumeration.patch`.
-
-Without (1) the patch alone is insufficient — the polling can never
-observe the re-enumerated device.  Without (2) the upstream's bare
-`sleep(1)` is fragile across hosts even when udev events do arrive.
-
-### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, non-fatal)*
+### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, cosmetic; no patch)*
 
 `src/rx888.c:943` (`rx888_set_hf_mode`) and `src/rx888.c:1003`
 (`rx888_start_rx`) both fire `command_send(...,TUNERSTDBY,0)`. SDDC
 firmware removed all R82xx commands (`docs/LICENSE_ANALYSIS.md`),
-so 0xB8 returns a clean USB STALL. Streaming likely survives because
-`command_send` ignores the error, but the bus is noisier than it
-should be.
+so 0xB8 returns a clean USB STALL via the firmware's default
+handler.  ka9q's `command_send` ignores the return value, so
+streaming is unaffected and init proceeds normally.  The only effect
+is bus-level noise: two STALLed control transfers per session.
 
-Fix: drop both calls. See
-`docker/ka9q-radio/patches/02-drop-tunerstdby-hf.patch`.
+We do not patch this either — purely cosmetic, would not change
+observable behavior, and removing two unconditional command sends
+that "happen to harmlessly fail" is exactly the kind of upstream
+patch most maintainers will reject as not-their-bug.
 
 ### 3. R82xx VHF path *(deferred, out of scope)*
 
@@ -203,36 +195,40 @@ the same frequency ka9q already wrote (harmless duplicate), sets
 returns immediately), and `STARTFX3`'s preflight then passes.  See
 `docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`.
 
+## Container-side requirements (no patches needed)
+
+A bind-mount of `/run/udev:/run/udev:ro` is **required** at
+`docker run` time so libusb's hotplug listener inside the container
+sees host udev events.  Without it libusb's cached device list never
+updates after the FX3 re-enumerates, and `rx888_usb_init()` exits
+with "Error or device could not be found".  See §1 for the analysis.
+
 ## Patches applied in this container
 
-`docker/ka9q-radio/patches/01-poll-reenumeration.patch` — poll
-`libusb_get_device_list` every 200 ms, up to 10 s, for
-`0x04b4:0x00f1` after firmware upload, then settle 1 s before
-returning.  Replaces `sleep(1)` at `rx888.c:700`.
-
-`docker/ka9q-radio/patches/02-drop-tunerstdby-hf.patch` — remove
-`TUNERSTDBY` at `rx888.c:943` and `rx888.c:1003`.
+The patch set is intentionally minimal — one patch, for the one
+incompatibility that has no host-side or container-side workaround:
 
 `docker/ka9q-radio/patches/03-startadc-before-startfx3.patch` —
 insert `command_send(...,STARTADC,samprate)` before `STARTFX3` in
-`rx888_start_rx` so SDDC's `GpifPreflightCheck()` passes.
+`rx888_start_rx` so SDDC's `GpifPreflightCheck()` passes (§8).
 
-The Dockerfile applies them with `git apply --whitespace=nowarn`
-against the pinned SHA, in alphabetical order.  When upstream
-ka9q-radio merges equivalent fixes, bump `KA9Q_RADIO_SHA` and drop
-the corresponding patch.
+The findings in §1 (`sleep(1)`) and §2 (TUNERSTDBY) are documented
+above but do **not** become container patches: §1 has a working
+container-level workaround (the udev mount), and §2 is purely
+cosmetic.  Carrying patches we don't strictly need would dilute the
+single ask we make of the upstream maintainer.
 
-A bind-mount of `/run/udev:/run/udev:ro` is also required at
-`docker run` time so libusb's hotplug listener inside the container
-sees host udev events; without it the polling patch can never
-observe the re-enumerated device.  See §1 for the analysis.
+The Dockerfile applies the patch with `git apply --whitespace=nowarn`
+against the pinned SHA.  When upstream ka9q-radio merges an
+equivalent fix, bump `KA9Q_RADIO_SHA` and drop the patch.
 
 ## Open work
 
-- Confirm container streams continuously (>1 minute) with all three
-  patches applied and the udev mount present.  Initial confirmation:
+- Confirm container streams continuously (>1 minute) with patch 03
+  applied and the udev mount present.  Initial confirmation:
   container reaches "rx888 running" and starts streaming; long-run
   stability not yet measured.
-- Decide whether to upstream patches 01–03 to `ka9q/ka9q-radio`.
+- Submit patch 03 upstream to `ka9q/ka9q-radio` as the focused
+  STARTADC/STARTFX3 ordering fix.
 - File issues for VHF support (firmware-side R82xx return) and the
   LED bit-position decision; both are non-blocking for HF receive.
