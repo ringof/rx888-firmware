@@ -84,14 +84,14 @@ COPY --from=builder /build/ka9q-radio/src/rx888.so /usr/local/lib/ka9q-radio/
 COPY --from=builder /build/ka9q-radio/src/sig_gen.so /usr/local/lib/ka9q-radio/
 
 # Create plugin directory and config directory
-RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio
+RUN mkdir -p /usr/local/lib/ka9q-radio /etc/radio /var/lib/ka9q-radio /usr/local/share/ka9q-radio
+
+# Install ka9q-radio share files (presets.conf, bandplan.txt, help.txt, etc.)
+# radiod loads /usr/local/share/ka9q-radio/presets.conf at startup.
+COPY --from=builder /build/ka9q-radio/share/ /usr/local/share/ka9q-radio/
 
 # Install minimal rx888 config for HF direct-sampling test
 COPY rx888-test.conf /etc/radio/radiod@rx888-test.conf
-
-# Copy firmware image if present (can also bind-mount at runtime)
-# The SDDC_FX3.img goes in the working directory or /usr/local/share/ka9q-radio/
-RUN mkdir -p /usr/local/share/ka9q-radio
 
 # Copy entrypoint
 COPY entrypoint.sh /entrypoint.sh
