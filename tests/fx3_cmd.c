@@ -3512,13 +3512,13 @@ static int do_test_watchdog_cap_observe(libusb_device_handle *h)
     r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL watchdog_cap_observe: STARTADC: %s\n", libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
     r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL watchdog_cap_observe: STARTFX3: %s\n", libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
 
@@ -3532,14 +3532,14 @@ static int do_test_watchdog_cap_observe(libusb_device_handle *h)
             printf("FAIL watchdog_cap_observe: GETSTATS poll %d: %s\n",
                    i, libusb_strerror(r));
             cmd_u32(h, STOPFX3, 0);
-            set_arg(h, WDG_MAX_RECOV, 0);
+            set_arg(h, WDG_MAX_RECOV, 5);
             return 1;
         }
         faults[nsamples++] = s.streaming_faults;
     }
 
     cmd_u32(h, STOPFX3, 0);
-    set_arg(h, WDG_MAX_RECOV, 0);
+    set_arg(h, WDG_MAX_RECOV, 5);
 
     /* Check: faults should plateau (last few values equal) */
     if (nsamples < 4) {
@@ -3596,14 +3596,14 @@ static int do_test_watchdog_cap_restart(libusb_device_handle *h)
     r = cmd_u32_retry(h, STARTADC, 64000000);
     if (r < 0) {
         printf("FAIL watchdog_cap_restart: STARTADC: %s\n", libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
     r = cmd_u32_retry(h, STARTFX3, 0);
     if (r < 0) {
         printf("FAIL watchdog_cap_restart: STARTFX3 #1: %s\n",
                libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
 
@@ -3618,13 +3618,13 @@ static int do_test_watchdog_cap_restart(libusb_device_handle *h)
     if (r < 0) {
         printf("FAIL watchdog_cap_restart: STARTFX3 #2 after cap: %s\n",
                libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 0);
+        set_arg(h, WDG_MAX_RECOV, 5);
         return 1;
     }
 
     int got = bulk_read_some(h, 16384, 2000);
     cmd_u32(h, STOPFX3, 0);
-    set_arg(h, WDG_MAX_RECOV, 0);
+    set_arg(h, WDG_MAX_RECOV, 5);
 
     if (got < 1024) {
         printf("FAIL watchdog_cap_restart: only %d bytes after cap restart "
