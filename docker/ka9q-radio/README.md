@@ -145,6 +145,29 @@ before this was added — rebuild with `docker build --no-cache`.
 
 To shut down: `./ka9q.sh stop`.
 
+#### `monitor` keybindings (cheat sheet)
+
+`monitor` is a curses program; press `h` inside it for the full
+in-app help screen.  Most-used keys:
+
+| Key | Action |
+|---|---|
+| `↑` `↓` | previous / next session |
+| `PgUp` `PgDn` | page through sessions |
+| `m` / `u` | mute / unmute current session (`u` also resets) |
+| `M` / `U` | mute / unmute all sessions |
+| `+` `-` | per-session gain ±1 dB |
+| `←` `→` | per-session pan (stereo) |
+| `Shift+←` / `Shift+→` | playout buffer ±1 ms |
+| `n` / `f` | notch on / off (current session) |
+| `s` / `t` | sort sessions by recent / total activity |
+| `r` | reset playout queue (current) |
+| `R` | reset all sessions |
+| `d` | delete current session |
+| `v` | toggle verbose display |
+| `h` | help screen |
+| `q` or `Q` | quit |
+
 #### Why `monitor`, not VLC
 
 ka9q-radio publishes RTP audio with **dynamic payload types** (PT
