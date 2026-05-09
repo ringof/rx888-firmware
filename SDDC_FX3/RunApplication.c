@@ -307,7 +307,6 @@ void ApplicationThread ( uint32_t input)
 							DebugPrint(4, "\r\nWDG: DMA resumed (%u->%u), stall cleared",
 								prevDMACount, curDMA);
 						stallCount = 0;
-						glWdgRecoveryCount = 0;
 						prevDMACount = curDMA;
 					}
 				}
