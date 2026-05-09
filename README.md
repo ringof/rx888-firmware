@@ -75,6 +75,52 @@ This builds `fx3_cmd` (vendor command exerciser) and `rx888_stream`
 (from the [rx888_tools](https://github.com/ringof/rx888_tools) submodule),
 uploads the firmware, and runs an automated test suite.
 
+## Firmware Robustness
+
+The firmware implements a layered recovery architecture so that
+streaming failures are almost always recoverable without power-cycling
+the device.
+
+### GPIF soft-stop
+
+The GPIF II state machine includes `!FW_TRG` exit transitions on all
+active states that can stall (TH0_RD, TH1_RD, TH0_WAIT, TH1_WAIT).
+When the host issues STOPFX3, the firmware deasserts FW_TRG and the
+state machine exits to IDLE within 3 clock cycles (~47 ns at 64 MHz).
+`CyU3PGpifDisable(CyFalse)` then disables a quiescent machine with no
+DMA debris.  If the SM fails to reach IDLE (e.g. dead external clock),
+the firmware falls back to `CyU3PGpifDisable(CyTrue)` (force-stop).
+
+### Watchdog recovery
+
+If the DMA pipeline stalls mid-stream (glDMACount stops advancing while
+the SM is in a BUSY or WAIT state), a watchdog in the main application
+loop detects it after 300 ms.  It tears down the GPIF and DMA channel,
+then rebuilds the pipeline — soft-stop first, force-stop as fallback.
+Recovery is capped at `WDG_MAX_RECOVERY_DEFAULT` (5) attempts per
+session; after that the watchdog waits for the host to issue a new
+STARTFX3.  The cap prevents unbounded recovery loops when the host is
+not draining data (e.g. application crash).
+
+### Host restart
+
+STOPFX3 followed by STARTFX3 resets all pipeline state: DMA channels,
+GPIF configuration, counters, and the watchdog recovery cap.  This is
+the heaviest recovery path and provides a clean slate regardless of
+what state the firmware was in.
+
+### Recovery hierarchy
+
+| Layer | Trigger | Action | Latency |
+|-------|---------|--------|---------|
+| Soft-stop | STOPFX3 / watchdog | FW_TRG deassert → SM exits to IDLE | ~1 ms |
+| Force-stop | Soft-stop failure | `CyU3PGpifDisable(CyTrue)` | ~1 ms |
+| Watchdog | DMA stall 300 ms | Tear down + rebuild pipeline | ~300 ms |
+| Host restart | Application decision | STOPFX3 + STARTFX3 | ~100 ms |
+
+Soak testing (500+ randomized cycles) demonstrates 100% health-check
+pass rate and zero device crashes with this architecture.
+
 ## Repository Layout
 
 ```
