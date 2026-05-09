@@ -67,9 +67,22 @@ docker run --rm -it --privileged \
 
 The `wisdom` bind mount persists FFTW wisdom across runs.  On first
 run the entrypoint generates wisdom for the host CPU (FFTW wisdom is
-CPU-specific — it cannot be baked into a portable image), which can
-take several minutes for the 64.8 MHz / 20 ms FFT.  Subsequent runs
-reuse the saved file.
+CPU-specific — it cannot be baked into a portable image).  Subsequent
+runs reuse the saved file.
+
+Planning rigor is controlled by the `FFTW_RIGOR` environment variable:
+
+| Value        | First-run time           | Runtime FFT performance |
+|--------------|--------------------------|-------------------------|
+| `estimate`   | instant                  | slowest                 |
+| `measure`    | minutes (default)        | near-optimal            |
+| `patient`    | hours (1.62M-point FFT)  | optimal                 |
+| `exhaustive` | many hours to days       | marginally > patient    |
+
+Pass it with `-e FFTW_RIGOR=<value>` on `docker run`, e.g.
+`-e FFTW_RIGOR=estimate` for a quick firmware-validation session, or
+`-e FFTW_RIGOR=patient` if you intend to operate the radio long-term
+and want the most efficient FFT plans.
 
 ### Interactive shell (for debugging)
 
