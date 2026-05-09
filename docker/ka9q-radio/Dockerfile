@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     libogg-dev \
     libsamplerate-dev \
+    portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone ka9q-radio — only need radiod + rx888 plugin
@@ -67,6 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libusb-1.0-0 \
     libogg0 \
     libsamplerate0 \
+    libportaudio2 \
     avahi-daemon \
     dbus \
     procps \
