@@ -60,9 +60,16 @@ docker run --rm -it --privileged \
 docker run --rm -it --privileged \
   -v /dev/bus/usb:/dev/bus/usb \
   -v $(pwd)/SDDC_FX3:/firmware \
+  -v $(pwd)/wisdom:/var/lib/ka9q-radio \
   --network host \
   ka9q-radio
 ```
+
+The `wisdom` bind mount persists FFTW wisdom across runs.  On first
+run the entrypoint generates wisdom for the host CPU (FFTW wisdom is
+CPU-specific — it cannot be baked into a portable image), which can
+take several minutes for the 64.8 MHz / 20 ms FFT.  Subsequent runs
+reuse the saved file.
 
 ### Interactive shell (for debugging)
 

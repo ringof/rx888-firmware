@@ -28,4 +28,23 @@ else
     echo "Make sure to run with: --privileged -v /dev/bus/usb:/dev/bus/usb"
 fi
 
+# Pre-generate FFTW wisdom on first run.  Wisdom is CPU-specific
+# (encodes which SIMD instruction set to use), so it cannot be baked
+# into a portable image — it must be generated on the host CPU that
+# will run the container.  Persist /var/lib/ka9q-radio across runs
+# (e.g. -v $(pwd)/wisdom:/var/lib/ka9q-radio) to skip this on every
+# start.  Sizes match the default rx888-test.conf (64.8 MHz, 20 ms
+# blocks → rof1620000; 12 kHz output → cob240).
+WISDOM_FILE="/var/lib/ka9q-radio/wisdom"
+if [ ! -s "$WISDOM_FILE" ]; then
+    echo "Generating FFTW wisdom for this host (one-time; may take several minutes)..."
+    mkdir -p "$(dirname "$WISDOM_FILE")" /etc/fftw
+    if fftwf-wisdom -v -T "$(nproc)" -o "$WISDOM_FILE" rof1620000 cob240; then
+        cp -f "$WISDOM_FILE" /etc/fftw/wisdomf 2>/dev/null || true
+        echo "Wisdom saved to $WISDOM_FILE."
+    else
+        echo "WARNING: wisdom generation failed; radiod will fall back to FFTW_ESTIMATE."
+    fi
+fi
+
 exec "$@"

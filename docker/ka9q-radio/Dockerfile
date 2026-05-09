@@ -81,7 +81,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libogg0 \
     libsamplerate0 \
     libportaudio2 \
+    libfftw3-bin \
     avahi-daemon \
+    avahi-utils \
     dbus \
     procps \
     usbutils \
