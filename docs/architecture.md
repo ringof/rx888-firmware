@@ -199,12 +199,15 @@ The firmware controls the GPIF via a software input signal
 
 **STOPFX3 (stop streaming):**
 
-1. `CyU3PGpifControlSWInput(CyFalse)` -- de-assert FW_TRG.
-2. `CyU3PGpifDisable(CyTrue)` -- force-disable the GPIF block.  The
-   waveform is **not** reloaded here (calling `CyU3PGpifLoad` would
-   re-enable the block and cause the SM to auto-advance).
-3. `CyU3PDmaMultiChannelReset()` -- reset DMA.
-4. `CyU3PUsbFlushEp()` -- flush EP1 IN.
+1. `CyU3PGpifControlSWInput(CyFalse)` -- de-assert FW_TRG.  The SM
+   sees `!FW_TRG` and transitions to IDLE within 3 clock cycles.
+2. `CyU3PThreadSleep(1)` -- wait 1 ms for SM and DMA to quiesce.
+3. `CyU3PGpifGetSMState()` -- verify SM reached IDLE (state 1).
+4. If IDLE: `CyU3PGpifDisable(CyFalse)` -- disable a quiescent SM,
+   preserving configuration.  If not IDLE (e.g. dead clock):
+   `CyU3PGpifDisable(CyTrue)` -- force-stop fallback.
+5. `CyU3PDmaMultiChannelReset()` -- reset DMA.
+6. `CyU3PUsbFlushEp()` -- flush EP1 IN.
 
 **GPIF watchdog (background recovery):**
 
@@ -219,8 +222,10 @@ Each recovery increments `glCounter[2]` (visible via `GETSTATS`).
 A per-session **recovery cap** (`glWdgMaxRecovery`, default 5) limits
 the number of consecutive watchdog recoveries before the watchdog
 stops retrying and waits for an explicit `STARTFX3` from the host.
-The cap counter (`glWdgRecoveryCount`) resets to zero whenever DMA
-resumes normally, and also on `STARTFX3` and `STOPFX3`.
+The cap counter (`glWdgRecoveryCount`) resets to zero on `STARTFX3`
+and `STOPFX3` only — it does not reset when DMA resumes after a
+successful watchdog recovery, so consecutive recoveries within a
+session are correctly counted toward the cap.
 
 The GPIF state machine includes `!FW_TRG → IDLE` exit transitions
 on all active states that can stall, enabling clean soft-stop without
@@ -791,8 +796,8 @@ every vendor command through `fx3_cmd`.
 | File | Lines | Purpose |
 |------|-------|---------|
 | `SDDC_FX3/StartUp.c` | 82 | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | 349 | Application thread, hardware detection, main loop, GPIF watchdog |
-| `SDDC_FX3/USBHandler.c` | 554 | USB setup callback (all vendor commands), USB init |
+| `SDDC_FX3/RunApplication.c` | 362 | Application thread, hardware detection, main loop, GPIF watchdog |
+| `SDDC_FX3/USBHandler.c` | 574 | USB setup callback (all vendor commands), USB init |
 | `SDDC_FX3/StartStopApplication.c` | 212 | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
 | `SDDC_FX3/DebugConsole.c` | 349 | UART init, debug buffer, console parser, USB debug |
 | `SDDC_FX3/USBDescriptor.c` | 299 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
@@ -805,5 +810,5 @@ every vendor command through `fx3_cmd`.
 | `SDDC_FX3/SDDC_GPIF.h` | 173 | Generated GPIF II state machine configuration |
 | `SDDC_FX3/cyfxtx.c` | -- | Cypress SDK memory and TX runtime support |
 | `SDDC_FX3/cyfx_gcc_startup.S` | -- | ARM GCC startup assembly (vectors, stack init) |
-| `tests/fx3_cmd.c` | 4714 | Host-side vendor command exerciser, soak test harness (libusb) |
-| `tests/fw_test.sh` | 701 | TAP test harness for automated firmware testing (36 tests + 3 streaming) |
+| `tests/fx3_cmd.c` | 4990 | Host-side vendor command exerciser, soak test harness (libusb) |
+| `tests/fw_test.sh` | 731 | TAP test harness for automated firmware testing (36 tests + 3 streaming) |
