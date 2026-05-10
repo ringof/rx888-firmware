@@ -15,7 +15,7 @@ jobs:
       - name: Install ARM cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
 
       - name: Build firmware
         run: make -C SDDC_FX3 clean all
@@ -39,7 +39,7 @@ jobs:
       - name: Install host build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev pkg-config
+          sudo apt-get install -y libusb-1.0-0-dev pkg-config
 
       - name: Build test tools
         run: make -C tests
