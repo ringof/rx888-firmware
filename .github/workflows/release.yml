@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  firmware:
+    name: Build SDDC_FX3 firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Build firmware
+        run: make -C SDDC_FX3 clean all
+
+      - name: Rename artifact with tag
+        run: cp SDDC_FX3/SDDC_FX3.img "SDDC_FX3-${GITHUB_REF_NAME}.img"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: SDDC_FX3-${{ github.ref_name }}.img
+          if-no-files-found: error
+
+  host-tools:
+    name: Build host tools (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev pkg-config
+
+      - name: Build test tools
+        run: make -C tests
+
+      - name: Stage host tools with tag-suffixed names
+        run: |
+          mkdir -p host-tools-out
+          cp tests/fx3_cmd "host-tools-out/fx3_cmd-${GITHUB_REF_NAME}-linux-x86_64"
+          # rx888_stream is a symlink in tests/; resolve to the real binary.
+          cp "$(readlink -f tests/rx888_stream)" \
+             "host-tools-out/rx888_stream-${GITHUB_REF_NAME}-linux-x86_64"
+
+      - name: Upload host-tools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-tools
+          path: host-tools-out/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [firmware, host-tools]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: assets/
+
+      - name: Download host-tools artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: host-tools
+          path: assets/
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
