@@ -3,12 +3,25 @@
 [![Latest release](https://img.shields.io/github/v/release/ringof/ExtIO_sddc?include_prereleases&label=latest%20release)](https://github.com/ringof/ExtIO_sddc/releases/latest)
 [![Build](https://github.com/ringof/ExtIO_sddc/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ringof/ExtIO_sddc/actions/workflows/build.yml?query=branch%3Amain)
 
-Cypress FX3 USB controller firmware for the RX888mk2 and related
-direct-sampling SDR hardware.
+Cypress FX3 USB controller firmware for the **RX888 mk2** (also written
+RX888mk2) direct-sampling SDR receiver. HF reception (0–32 MHz) via the
+on-board LTC2208 ADC; the R828D VHF tuner is detected but not driven by
+the firmware (see Limitations).
 
-This repository is a fork of the firmware portion of
-[ExtIO_sddc](https://github.com/ik1xpv/ExtIO_sddc), stripped down to
-support the RX888mk2 (rx888r2) hardware only.
+## Compatible host applications
+
+- **[ka9q-radio](https://github.com/ka9q/ka9q-radio)** — multichannel
+  software-defined-radio receiver with native RX888 support. Validated
+  end-to-end via the bundled Docker test container; see
+  [`docker/ka9q-radio/`](docker/ka9q-radio/) for setup.
+- **[rx888_tools](https://github.com/ringof/rx888_tools)** — streamer,
+  DSP utilities, and udev rules maintained alongside this firmware. The
+  `rx888_stream` binary from this project is the firmware uploader and
+  USB capture tool used by the test harness in [`tests/`](tests/).
+- **ExtIO-based Windows hosts** (HDSDR, SDR Console) — historically
+  supported via the upstream
+  [ExtIO_sddc](https://github.com/ik1xpv/ExtIO_sddc) project. This fork
+  is firmware-only and does not include the ExtIO DLL.
 
 ## Limitations
 
