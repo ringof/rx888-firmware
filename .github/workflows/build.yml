@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  firmware:
+    name: SDDC_FX3 firmware (arm-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+
+      - name: Build firmware
+        run: make -C SDDC_FX3 clean all
+
+      - name: Upload firmware image
+        uses: actions/upload-artifact@v4
+        with:
+          name: SDDC_FX3.img
+          path: SDDC_FX3/SDDC_FX3.img
+          if-no-files-found: error
+
+  host-tests:
+    name: Host test tools (fx3_cmd, rx888_stream)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libusb-1.0-0-dev pkg-config
+
+      - name: Build test tools
+        run: make -C tests
