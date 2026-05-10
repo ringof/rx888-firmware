@@ -27,6 +27,16 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
+      - name: Determine asset suffix (stable tags drop the tag suffix)
+        run: |
+          # Stable tag (e.g. v1.0.0) → empty suffix → drop-in name SDDC_FX3.img
+          # Prerelease (e.g. v1.0.0-rc1) → -<TAG> suffix → SDDC_FX3-v1.0.0-rc1.img
+          if [[ "${TAG}" == *-* ]]; then
+            echo "ASSET_SUFFIX=-${TAG}" >> "$GITHUB_ENV"
+          else
+            echo "ASSET_SUFFIX=" >> "$GITHUB_ENV"
+          fi
+
       - name: Install ARM cross-compiler
         run: |
           sudo apt-get update
@@ -35,14 +45,14 @@ jobs:
       - name: Build firmware
         run: make -C SDDC_FX3 clean all
 
-      - name: Rename artifact with tag
-        run: cp SDDC_FX3/SDDC_FX3.img "SDDC_FX3-${TAG}.img"
+      - name: Rename artifact
+        run: cp SDDC_FX3/SDDC_FX3.img "SDDC_FX3${ASSET_SUFFIX}.img"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: SDDC_FX3-${{ env.TAG }}.img
+          path: SDDC_FX3${{ env.ASSET_SUFFIX }}.img
           if-no-files-found: error
 
   host-tools:
@@ -55,6 +65,14 @@ jobs:
           ref: ${{ env.TAG }}
           submodules: recursive
 
+      - name: Determine asset suffix (stable tags drop the tag suffix)
+        run: |
+          if [[ "${TAG}" == *-* ]]; then
+            echo "ASSET_SUFFIX=-${TAG}" >> "$GITHUB_ENV"
+          else
+            echo "ASSET_SUFFIX=" >> "$GITHUB_ENV"
+          fi
+
       - name: Install host build dependencies
         run: |
           sudo apt-get update
@@ -63,13 +81,13 @@ jobs:
       - name: Build test tools
         run: make -C tests
 
-      - name: Stage host tools with tag-suffixed names
+      - name: Stage host tools
         run: |
           mkdir -p host-tools-out
-          cp tests/fx3_cmd "host-tools-out/fx3_cmd-${TAG}-linux-x86_64"
+          cp tests/fx3_cmd "host-tools-out/fx3_cmd${ASSET_SUFFIX}-linux-x86_64"
           # rx888_stream is a symlink in tests/; resolve to the real binary.
           cp "$(readlink -f tests/rx888_stream)" \
-             "host-tools-out/rx888_stream-${TAG}-linux-x86_64"
+             "host-tools-out/rx888_stream${ASSET_SUFFIX}-linux-x86_64"
 
       - name: Upload host-tools artifact
         uses: actions/upload-artifact@v4
