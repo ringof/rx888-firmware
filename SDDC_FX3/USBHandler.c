@@ -260,6 +260,12 @@ CyFxSlFifoApplnUSBSetupCB (
 						I2cTransfer(0x00, 0xC0, 1, &si_status, CyTrue); /* Si5351 reg 0 */
 						glEp0Buffer[off++] = si_status;                  /* [19] */
 					}
+					/* Diagnostic: si5351_clk0_enabled() state from the
+					 * most recent call.  Lets the host correlate the
+					 * chip's reg-16 value with the firmware's preflight
+					 * decision when investigating CLK0-related issues. */
+					glEp0Buffer[off++] = glLastClk0Reg16;   /* [20] */
+					glEp0Buffer[off++] = glLastClk0Result;  /* [21] */
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}

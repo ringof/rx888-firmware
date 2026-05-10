@@ -159,6 +159,19 @@ CyBool_t si5351_pll_locked(void)
 }
 
 /*
+ * Diagnostic: GETSTATS exposes these as bytes [20] and [21].
+ *   glLastClk0Reg16  — the byte read from CLK0_CONTROL on the most
+ *                      recent call.  0xFF if the I2C read failed
+ *                      (default uninitialised value).
+ *   glLastClk0Result — what si5351_clk0_enabled() returned to its
+ *                      caller (1 = CyTrue, 0 = CyFalse).
+ * Diagnostic only; lets host correlate the chip's actual reg-16
+ * value with the firmware's preflight decision.
+ */
+volatile uint8_t glLastClk0Reg16  = 0xFF;
+volatile uint8_t glLastClk0Result = 0;
+
+/*
  * si5351_clk0_enabled — return whether CLK0 is currently powered up.
  *
  * Reads CLK0_CONTROL (register 16) bit 7 (CLK0_PDN) directly over I2C.
@@ -178,11 +191,18 @@ CyBool_t si5351_clk0_enabled(void)
 {
 	uint8_t reg16 = 0xFF;  /* default = "powered down" if I2C fails */
 	CyU3PReturnStatus_t rc;
+	CyBool_t result;
 
 	rc = I2cTransfer(SI_CLK0_CONTROL, SI5351_ADDR, 1, &reg16, CyTrue);
-	if (rc != CY_U3P_SUCCESS)
+	if (rc != CY_U3P_SUCCESS) {
+		glLastClk0Reg16  = 0xFF;
+		glLastClk0Result = 0;
 		return CyFalse;
-	return (reg16 & 0x80) == 0;
+	}
+	result = ((reg16 & 0x80) == 0) ? CyTrue : CyFalse;
+	glLastClk0Reg16  = reg16;
+	glLastClk0Result = (result == CyTrue) ? 1 : 0;
+	return result;
 }
 
 CyU3PReturnStatus_t si5351aSetFrequencyA(UINT32 freq)
