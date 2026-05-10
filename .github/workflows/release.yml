@@ -4,14 +4,28 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing git tag to (re)build and publish (e.g. v0.1.0-rc0)'
+        required: true
+        type: string
+
+# Resolve the tag from either trigger.  On push:tags, github.ref_name is
+# the tag; on workflow_dispatch, it's the branch the run was launched
+# from, so we fall back to the user-supplied input.
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   firmware:
     name: Build SDDC_FX3 firmware
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (at tag)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Install ARM cross-compiler
         run: |
@@ -22,22 +36,23 @@ jobs:
         run: make -C SDDC_FX3 clean all
 
       - name: Rename artifact with tag
-        run: cp SDDC_FX3/SDDC_FX3.img "SDDC_FX3-${GITHUB_REF_NAME}.img"
+        run: cp SDDC_FX3/SDDC_FX3.img "SDDC_FX3-${TAG}.img"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: SDDC_FX3-${{ github.ref_name }}.img
+          path: SDDC_FX3-${{ env.TAG }}.img
           if-no-files-found: error
 
   host-tools:
     name: Build host tools (Linux x86_64)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout (at tag, with submodules)
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TAG }}
           submodules: recursive
 
       - name: Install host build dependencies
@@ -51,10 +66,10 @@ jobs:
       - name: Stage host tools with tag-suffixed names
         run: |
           mkdir -p host-tools-out
-          cp tests/fx3_cmd "host-tools-out/fx3_cmd-${GITHUB_REF_NAME}-linux-x86_64"
+          cp tests/fx3_cmd "host-tools-out/fx3_cmd-${TAG}-linux-x86_64"
           # rx888_stream is a symlink in tests/; resolve to the real binary.
           cp "$(readlink -f tests/rx888_stream)" \
-             "host-tools-out/rx888_stream-${GITHUB_REF_NAME}-linux-x86_64"
+             "host-tools-out/rx888_stream-${TAG}-linux-x86_64"
 
       - name: Upload host-tools artifact
         uses: actions/upload-artifact@v4
@@ -85,6 +100,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: assets/*
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
