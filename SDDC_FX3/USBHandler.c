@@ -224,10 +224,10 @@ CyFxSlFifoApplnUSBSetupCB (
 							 * arriving shortly after STARTADC is not delayed.
 							 *
 							 * We use si5351_pll_locked() rather than
-							 * GpifPreflightCheck() because we just called
-							 * si5351aSetFrequencyA(freq) with freq > 0, so
-							 * glAdcClockEnabled is already CyTrue — the
-							 * extra clk0_enabled check would be redundant. */
+							 * GpifPreflightCheck() because we just wrote
+							 * CLK0_CONTROL with the powered-up value, so
+							 * the clk0_enabled chip query would be
+							 * redundant work on the I2C bus. */
 							{
 								int i;
 								for (i = 0; i < 100; i++) {

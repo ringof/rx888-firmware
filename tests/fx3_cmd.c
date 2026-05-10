@@ -501,6 +501,7 @@ static int do_test_stats_pll(libusb_device_handle *h);
 static int do_test_stop_gpif_state(libusb_device_handle *h);
 static int do_test_stop_start_cycle(libusb_device_handle *h);
 static int do_test_pll_preflight(libusb_device_handle *h);
+static int do_test_clk0_chip_query(libusb_device_handle *h);
 static int do_test_wedge_recovery(libusb_device_handle *h);
 static int do_test_clock_pull(libusb_device_handle *h);
 static int do_test_freq_hop(libusb_device_handle *h);
@@ -554,6 +555,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stop_gpif_state",  do_test_stop_gpif_state},
     {"stop_start_cycle", do_test_stop_start_cycle},
     {"pll_preflight",    do_test_pll_preflight},
+    {"clk0_chip_query",  do_test_clk0_chip_query},
     {"wedge_recovery",   do_test_wedge_recovery},
     {"clock_pull",       do_test_clock_pull},
     {"freq_hop",         do_test_freq_hop},
@@ -601,6 +603,7 @@ static void print_local_help(void)
            "  stop_gpif_state               Verify GPIF SM stops after STOP\n"
            "  stop_start_cycle              Cycle STOP+START N times\n"
            "  pll_preflight                 Verify START rejected without clock\n"
+           "  clk0_chip_query               Verify CLK0 state read from chip, not flag\n"
            "  wedge_recovery                Provoke DMA wedge, test recovery\n"
            "  clock_pull                    Pull clock mid-stream, verify recovery\n"
            "  freq_hop                      Rapid ADC frequency hopping\n"
@@ -1810,6 +1813,88 @@ static int do_test_pll_preflight(libusb_device_handle *h)
     }
     printf("FAIL pll_preflight: STARTFX3 accepted with ADC clock off (no PLL pre-flight check)\n");
     return 1;
+}
+
+/* Verify si5351_clk0_enabled() reads the chip directly (not a stale
+ * software flag).  Regression test for the fix that replaced the
+ * glAdcClockEnabled flag with a CLK0_CONTROL register-16 query.
+ *
+ * Sequence:
+ *   1. STARTADC(64M) — register 16 ends up at 0x4F (bit 7 = 0, powered up).
+ *   2. STARTFX3 must succeed (clock up, PLL locked).  STOPFX3.
+ *   3. Power down CLK0 directly via I2CWFX3 (write 0x80 to reg 16).
+ *      No firmware-side flag is touched — only the chip register changes.
+ *   4. STARTFX3 must STALL.  Pre-fix firmware would wrongly succeed
+ *      because the flag was still CyTrue; post-fix firmware reads the
+ *      chip and refuses preflight.
+ *   5. Restore: STARTADC(64M) + STARTFX3 must succeed again.
+ *   6. STOPFX3.  Device is left clean for the next scenario.
+ *
+ * Recoverability: every STARTFX3 outcome is bounded (success or STALL);
+ * neither wedges the GPIF.  STARTADC always restores a known good state.
+ */
+static int do_test_clk0_chip_query(libusb_device_handle *h)
+{
+    int r;
+
+    /* 1. Program Si5351 via STARTADC (firmware path) */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: STARTADC(64M): %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 2. Baseline: STARTFX3 should succeed, then STOPFX3 */
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: baseline STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    cmd_u32(h, STOPFX3, 0);
+
+    /* 3. Power down CLK0 directly via I2CWFX3 — bypass STARTADC entirely.
+     *    SI5351_ADDR = 0xC0; SI_CLK0_CONTROL = 16; 0x80 = CLK0_PDN bit set. */
+    uint8_t pdn = 0x80;
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 16, &pdn, 1);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: I2CWFX3 power-down: %s\n", libusb_strerror(r));
+        cmd_u32(h, STARTADC, 32000000);
+        return 1;
+    }
+
+    /* 4. STARTFX3 must STALL — chip query must catch the powered-down state */
+    r = cmd_u32(h, STARTFX3, 0);
+    int stalled = (r == LIBUSB_ERROR_PIPE);
+    if (r == 0) {
+        /* Firmware accepted START — that means it trusted a stale flag
+         * instead of querying the chip.  Clean up before failing. */
+        cmd_u32(h, STOPFX3, 0);
+    }
+    if (!stalled) {
+        printf("FAIL clk0_chip_query: STARTFX3 accepted with CLK0 powered down "
+               "(rc=%d) — chip query missing or returned stale state\n", r);
+        cmd_u32(h, STARTADC, 32000000);
+        return 1;
+    }
+
+    /* 5. Restore via STARTADC and verify STARTFX3 succeeds again */
+    r = cmd_u32_retry(h, STARTADC, 64000000);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: STARTADC restore: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    r = cmd_u32(h, STARTFX3, 0);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: post-restore STARTFX3: %s\n", libusb_strerror(r));
+        return 1;
+    }
+
+    /* 6. Clean up */
+    cmd_u32(h, STOPFX3, 0);
+
+    printf("PASS clk0_chip_query: STARTFX3 STALLs after I2CWFX3 power-down "
+           "and resumes after restore\n");
+    return 0;
 }
 
 /* Test recovery after a deliberate DMA backpressure wedge.
@@ -4351,6 +4436,7 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         {"oob_brequest",        do_test_oob_brequest,         5, 0, 0, 0},
         {"oob_setarg",          do_test_oob_setarg,           5, 0, 0, 0},
         {"pll_preflight",       do_test_pll_preflight,       10, 0, 0, 0},
+        {"clk0_chip_query",     do_test_clk0_chip_query,     10, 0, 0, 0},
         {"clock_pull",          do_test_clock_pull,          10, 0, 0, 0},
         {"freq_hop",            do_test_freq_hop,            10, 0, 0, 0},
         {"ep0_stall_recovery",  do_test_ep0_stall_recovery,   5, 0, 0, 0},
@@ -4639,6 +4725,7 @@ static void usage(const char *prog)
         "  stop_gpif_state              Verify GPIF SM stops after STOPFX3\n"
         "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
         "  pll_preflight                Verify STARTFX3 rejected without clock\n"
+        "  clk0_chip_query              Verify CLK0 state read from chip, not flag\n"
         "  wedge_recovery               Provoke DMA wedge, test STOP+START recovery\n"
         "  clock_pull                   Pull clock mid-stream, verify recovery\n"
         "  freq_hop                     Rapid ADC frequency hopping\n"
@@ -4658,6 +4745,8 @@ static void usage(const char *prog)
         "  rapid_adc_reprogram          Back-to-back STARTADC freq changes\n"
         "  debug_while_streaming        READINFODEBUG during active stream\n"
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
+        "  gpif_soft_stop               Verify SM lands in IDLE (needs new waveform)\n"
+        "  stop_under_backpressure      STOP while DMA buffers full\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
         "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
@@ -4851,6 +4940,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "pll_preflight") == 0) {
         rc = do_test_pll_preflight(h);
 
+    } else if (strcmp(cmd, "clk0_chip_query") == 0) {
+        rc = do_test_clk0_chip_query(h);
+
     } else if (strcmp(cmd, "wedge_recovery") == 0) {
         rc = do_test_wedge_recovery(h);
 
@@ -4955,6 +5047,12 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "data_sanity") == 0) {
         rc = do_test_data_sanity(h);
+
+    } else if (strcmp(cmd, "gpif_soft_stop") == 0) {
+        rc = do_test_gpif_soft_stop(h);
+
+    } else if (strcmp(cmd, "stop_under_backpressure") == 0) {
+        rc = do_test_stop_under_backpressure(h);
 
     } else if (strcmp(cmd, "watchdog_stress") == 0) {
         int secs = (argc >= 3) ? (int)parse_num(argv[2]) : 120;

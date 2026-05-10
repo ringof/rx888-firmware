@@ -50,10 +50,6 @@
 #define SI5351_PLLB_SOURCE              (1<<3)
 #define SI5351_PLLA_SOURCE              (1<<2)
 
-/* Software flag: CyTrue once si5351aSetFrequencyA(freq>0) succeeds,
- * CyFalse after si5351aSetFrequencyA(0) powers down CLK0. */
-static CyBool_t glAdcClockEnabled = CyFalse;
-
 CyU3PReturnStatus_t Si5351Init()
 {
 	CyU3PReturnStatus_t status;
@@ -163,15 +159,30 @@ CyBool_t si5351_pll_locked(void)
 }
 
 /*
- * si5351_clk0_enabled — return whether the firmware has enabled CLK0 output.
+ * si5351_clk0_enabled — return whether CLK0 is currently powered up.
  *
- * Powering down CLK0 (freq=0) does not unlock PLL A, so pll_locked()
- * alone cannot detect a disabled clock output.  This flag tracks the
- * last si5351aSetFrequencyA() result.
+ * Reads CLK0_CONTROL (register 16) bit 7 (CLK0_PDN) directly over I2C.
+ *   bit 7 = 0 → CLK0 powered up and running
+ *   bit 7 = 1 → CLK0 powered down (chip default at power-on)
+ *
+ * The hardware register is authoritative: it reflects the actual chip
+ * state regardless of which path programmed it (STARTADC via the
+ * firmware's si5351aSetFrequencyA(), or direct host programming via
+ * I2CWFX3).  This avoids a hidden coupling where a software flag set
+ * only by STARTADC misses hosts that program the Si5351 themselves.
+ *
+ * Returns CyFalse if the I2C read fails — preflight then refuses to
+ * start GPIF, which is the safe behaviour.
  */
 CyBool_t si5351_clk0_enabled(void)
 {
-	return glAdcClockEnabled;
+	uint8_t reg16 = 0xFF;  /* default = "powered down" if I2C fails */
+	CyU3PReturnStatus_t rc;
+
+	rc = I2cTransfer(SI_CLK0_CONTROL, SI5351_ADDR, 1, &reg16, CyTrue);
+	if (rc != CY_U3P_SUCCESS)
+		return CyFalse;
+	return (reg16 & 0x80) == 0;
 }
 
 CyU3PReturnStatus_t si5351aSetFrequencyA(UINT32 freq)
@@ -189,7 +200,6 @@ CyU3PReturnStatus_t si5351aSetFrequencyA(UINT32 freq)
 
 	if (freq == 0)
 	{
-		glAdcClockEnabled = CyFalse;
 		return I2cTransferW1 ( SI_CLK0_CONTROL, SI5351_ADDR, 0x80); // clk1 off
 	}
 
@@ -246,8 +256,6 @@ CyU3PReturnStatus_t si5351aSetFrequencyA(UINT32 freq)
 	status = I2cTransferW1 (SI_CLK0_CONTROL, SI5351_ADDR,  0x4F | SI_CLK_SRC_PLL_A);
 	if (status != CY_U3P_SUCCESS)
 		DebugPrint(4, "Si5351 CLK0 control failed: %d", status);
-	else
-		glAdcClockEnabled = CyTrue;
 	return status;
 }
 
