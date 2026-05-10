@@ -1305,7 +1305,7 @@ static int do_test_stack_check(libusb_device_handle *h)
 /* GETSTATS tests                                                     */
 /* ------------------------------------------------------------------ */
 
-/* GETSTATS response layout (20 bytes, little-endian):
+/* GETSTATS response layout (22 bytes, little-endian):
  *   [0..3]   uint32  DMA buffer completions
  *   [4]      uint8   GPIF state machine state
  *   [5..8]   uint32  PIB error count
@@ -1313,8 +1313,10 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [11..14] uint32  I2C failure count
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
+ *   [20]     uint8   Last reg-16 byte read by si5351_clk0_enabled() (diagnostic)
+ *   [21]     uint8   Last si5351_clk0_enabled() return value (1=true, 0=false)
  */
-#define GETSTATS_LEN  20
+#define GETSTATS_LEN  22
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1324,6 +1326,8 @@ struct fx3_stats {
     uint32_t i2c_failures;
     uint32_t streaming_faults;
     uint8_t  si5351_status;
+    uint8_t  last_clk0_reg16;
+    uint8_t  last_clk0_result;
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1338,7 +1342,9 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->last_pib_arg, &buf[9],  2);
     memcpy(&s->i2c_failures, &buf[11], 4);
     memcpy(&s->streaming_faults, &buf[15], 4);
-    s->si5351_status = buf[19];
+    s->si5351_status    = buf[19];
+    s->last_clk0_reg16  = buf[20];
+    s->last_clk0_result = buf[21];
     return 0;
 }
 
@@ -1351,10 +1357,11 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X "
+           "clk0_reg16=0x%02X clk0_result=%u\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status);
+           s.si5351_status, s.last_clk0_reg16, s.last_clk0_result);
     return 0;
 }
 
