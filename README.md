@@ -1,7 +1,7 @@
 # SDDC_FX3 Firmware
 
-[![Latest release](https://img.shields.io/github/v/release/ringof/ExtIO_sddc?include_prereleases&label=latest%20release)](https://github.com/ringof/ExtIO_sddc/releases/latest)
-[![Build](https://github.com/ringof/ExtIO_sddc/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ringof/ExtIO_sddc/actions/workflows/build.yml?query=branch%3Amain)
+[![Latest release](https://img.shields.io/github/v/release/ringof/rx888-firmware?include_prereleases&label=latest%20release)](https://github.com/ringof/rx888-firmware/releases/latest)
+[![Build](https://github.com/ringof/rx888-firmware/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ringof/rx888-firmware/actions/workflows/build.yml?query=branch%3Amain)
 
 Cypress FX3 USB controller firmware for the **RX888 mk2** (also written
 RX888mk2) direct-sampling SDR receiver. HF reception (0–32 MHz) via the
