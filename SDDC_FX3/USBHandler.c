@@ -323,8 +323,6 @@ CyFxSlFifoApplnUSBSetupCB (
 				break;
 
     	 	case STARTFX3:
-					CyU3PUsbLPMDisable();
-    	 		    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 				/*
 				 * Preflight: verify the ADC clock is running before
 				 * starting the GPIF state machine.  The SM is clocked
@@ -332,14 +330,22 @@ CyFxSlFifoApplnUSBSetupCB (
 				 * in a read state with no timeout-based recovery.
 				 * See GpifPreflightCheck() in StartStopApplication.c
 				 * and si5351_pll_locked() in Si5351.c for details.
+				 *
+				 * Run BEFORE CyU3PUsbGetEP0Data: that call completes
+				 * both data and status phases of the control transfer,
+				 * after which a CyU3PUsbStall would arrive too late
+				 * for the host to observe — libusb_control_transfer
+				 * returns success and the host falsely concludes
+				 * STARTFX3 was accepted.  Leaving isHandled=CyFalse
+				 * on rejection lets the FX3 USB driver auto-stall the
+				 * whole transfer, so the host sees LIBUSB_ERROR_PIPE.
 				 */
 				if (!GpifPreflightCheck()) {
-					/* Data phase already ACKed by GetEP0Data;
-					 * stall status phase so host sees rejection. */
-					CyU3PUsbStall(0, CyTrue, CyFalse);
-					isHandled = CyTrue;
-					break;
+					DebugPrint(4, "\r\nSTARTFX3 rejected by preflight");
+					break;  /* isHandled stays CyFalse → driver stalls */
 				}
+				CyU3PUsbLPMDisable();
+    	 		    CyU3PUsbGetEP0Data(wLength, glEp0Buffer, NULL);
 				/* Stop any running SM before restart.  Always use
 				 * CyTrue (force-reload) here because StartGPIF()
 				 * calls CyU3PGpifLoad() which reloads the config
