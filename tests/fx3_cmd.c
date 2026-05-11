@@ -4658,6 +4658,8 @@ static void usage(const char *prog)
         "  rapid_adc_reprogram          Back-to-back STARTADC freq changes\n"
         "  debug_while_streaming        READINFODEBUG during active stream\n"
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
+        "  gpif_soft_stop               Verify SM lands in IDLE (needs new waveform)\n"
+        "  stop_under_backpressure      STOP while DMA buffers full\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
         "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
@@ -4907,6 +4909,12 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "abandoned_stream") == 0) {
         rc = do_test_abandoned_stream(h);
+
+    } else if (strcmp(cmd, "gpif_soft_stop") == 0) {
+        rc = do_test_gpif_soft_stop(h);
+
+    } else if (strcmp(cmd, "stop_under_backpressure") == 0) {
+        rc = do_test_stop_under_backpressure(h);
 
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);
