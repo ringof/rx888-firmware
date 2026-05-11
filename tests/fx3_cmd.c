@@ -1954,15 +1954,14 @@ static int do_test_wedge_recovery(libusb_device_handle *h)
     }
     usleep(100000);
 
-    /* 5. Restart */
-    r = cmd_u32(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL wedge_recovery: STARTFX3 after stop: %s\n", libusb_strerror(r));
-        return 1;
-    }
-
-    /* 6. Read bulk data — should flow if recovery worked */
-    int got = bulk_read_some(h, 16384, 2000);
+    /* 5+6. Restart + read with primed bulk TD.  At 64 MS/s the 4×16 KB DMA
+     *      buffers fill in ~0.5 ms; an unprimed STARTFX3 followed by
+     *      bulk_read_some loses that race and the xHCI endpoint enters an
+     *      error state (LIBUSB_ERROR_IO with zero bytes).  primed_start_and_read
+     *      queues the bulk TD *before* sending STARTFX3, matching the
+     *      primitive that stop_under_backpressure already uses successfully
+     *      against the same backpressure shape. */
+    int got = primed_start_and_read(h, 16384, 2000);
 
     /* 6a. Diagnostic: snapshot GETSTATS while GPIF is still running */
     struct fx3_stats s_live = {0};
