@@ -4685,28 +4685,26 @@ static int do_test_health_recovery(libusb_device_handle *h)
         return 1;
     }
 
-    if (!g_firmware_path) {
-        printf("FAIL test_health_recovery: requires -F <firmware.img> "
-               "to re-upload after watchdog reset\n");
-        return 1;
-    }
-
-    /* Resolve firmware path early so a missing/bad path fails BEFORE we
-     * trip the watchdog and leave the device in bootloader.  Try the
-     * given path first; fall back to a conventional relative location
-     * when invoked from tests/ (where ../SDDC_FX3/SDDC_FX3.img is the
-     * usual layout). */
+    /* Resolve firmware path BEFORE tripping the watchdog so a missing
+     * or unspecified path fails cleanly without stranding the device
+     * in bootloader.  Try -F if given; otherwise fall back to the
+     * conventional ../SDDC_FX3/SDDC_FX3.img path when invoked from
+     * tests/.  This lets `./fx3_cmd soak ...` work without an explicit
+     * -F so long as the firmware build is in its usual location. */
     const char *fw = g_firmware_path;
-    if (access(fw, R_OK) != 0) {
-        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0) {
         if (access(fallback, R_OK) == 0) {
-            printf("# firmware path '%s' not readable here; using fallback '%s'\n",
-                   fw, fallback);
+            if (fw) {
+                printf("# firmware path '%s' not readable; using fallback '%s'\n",
+                       fw, fallback);
+            }
             fw = fallback;
         } else {
-            printf("FAIL test_health_recovery: firmware path '%s' not readable "
-                   "(also tried '%s').  Use -F <firmware.img> with a path that "
-                   "resolves from your current working directory.\n", fw, fallback);
+            printf("FAIL test_health_recovery: no readable firmware "
+                   "(tried '%s' and '%s').  Use -F <firmware.img> with a "
+                   "path that resolves from your current working directory.\n",
+                   fw ? fw : "(none)", fallback);
             return 1;
         }
     }
@@ -4821,24 +4819,24 @@ static int do_test_main_recovery(libusb_device_handle *h)
         return 1;
     }
 
-    if (!g_firmware_path) {
-        printf("FAIL test_main_recovery: requires -F <firmware.img> "
-               "to re-upload after HWDT reset\n");
-        return 1;
-    }
-
-    /* Resolve firmware path before tripping the watchdog so a bad
-     * path can't leave the device stuck in bootloader. */
+    /* Resolve firmware path BEFORE tripping the watchdog so a missing
+     * or unspecified path fails cleanly without stranding the device
+     * in bootloader.  Same shape as test_health_recovery — see that
+     * function for the rationale. */
     const char *fw = g_firmware_path;
-    if (access(fw, R_OK) != 0) {
-        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0) {
         if (access(fallback, R_OK) == 0) {
-            printf("# firmware path '%s' not readable here; using fallback '%s'\n",
-                   fw, fallback);
+            if (fw) {
+                printf("# firmware path '%s' not readable; using fallback '%s'\n",
+                       fw, fallback);
+            }
             fw = fallback;
         } else {
-            printf("FAIL test_main_recovery: firmware path '%s' not readable "
-                   "(also tried '%s')\n", fw, fallback);
+            printf("FAIL test_main_recovery: no readable firmware "
+                   "(tried '%s' and '%s').  Use -F <firmware.img> with a "
+                   "path that resolves from your current working directory.\n",
+                   fw ? fw : "(none)", fallback);
             return 1;
         }
     }
