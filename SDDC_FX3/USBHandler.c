@@ -269,6 +269,10 @@ CyFxSlFifoApplnUSBSetupCB (
 						I2cTransfer(0x00, 0xC0, 1, &si_status, CyTrue); /* Si5351 reg 0 */
 						glEp0Buffer[off++] = si_status;                  /* [19] */
 					}
+					{
+						uint32_t boot_count = health_boot_count();       /* [20..23] */
+						memcpy(&glEp0Buffer[off], &boot_count, 4); off += 4;
+					}
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}

@@ -1318,7 +1318,9 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
  */
-#define GETSTATS_LEN  20
+#define GETSTATS_LEN  24    /* bumped from 20 in PR 3 — adds boot_count [20..23].
+                             * Strict-length check below means flashing the new
+                             * firmware is required after this host update. */
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1328,6 +1330,10 @@ struct fx3_stats {
     uint32_t i2c_failures;
     uint32_t streaming_faults;
     uint8_t  si5351_status;
+    uint32_t boot_count;       /* Increments once per firmware boot.  Mismatch
+                                * across two snapshots = device reset between
+                                * them (HWDT, CyU3PDeviceReset, RESETFX3, or
+                                * power cycle). */
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1343,6 +1349,7 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->i2c_failures, &buf[11], 4);
     memcpy(&s->streaming_faults, &buf[15], 4);
     s->si5351_status = buf[19];
+    memcpy(&s->boot_count, &buf[20], 4);
     return 0;
 }
 
@@ -1355,10 +1362,10 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status);
+           s.si5351_status, s.boot_count);
     return 0;
 }
 

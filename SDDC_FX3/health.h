@@ -58,6 +58,13 @@ void health_init(void);
  * stops calling this, HWDT fires and the device hard-resets. */
 void health_pet(void);
 
+/* Read the boot counter — incremented once per firmware boot inside
+ * health_init().  Exposed via GETSTATS so the host can detect that the
+ * device reset between two snapshots, regardless of the cause (Level 4
+ * CyU3PDeviceReset, Level 5 HWDT, manual RESETFX3, power cycle).
+ * Reset to 0 by every cold boot — no NVRAM persistence. */
+uint32_t health_boot_count(void);
+
 /* Record a liveness event.  Safe from any thread (main, USB callback,
  * DMA callback, timer ISR).  O(1). */
 void health_record_event(health_event_t event);

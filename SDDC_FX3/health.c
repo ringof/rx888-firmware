@@ -46,16 +46,31 @@ static struct {
     volatile uint8_t  ep0_handler_in_progress;
 } glHealthState = { 0, 0 };
 
+/* Boot counter — incremented once per firmware boot in health_init().
+ * Exposed via GETSTATS so the host can detect mid-test device resets
+ * (Level 4 CyU3PDeviceReset, Level 5 HWDT, manual RESETFX3, or power
+ * cycle).  No NVRAM persistence; cold boot resets to 0. */
+static uint32_t glBootCount = 0;
+
 void health_init(void)
 {
     glHealthState.ep0_handler_enter_ms = 0;
     glHealthState.ep0_handler_in_progress = 0;
+
+    /* Increment first thing so the count reflects "this is boot N".
+     * Exposed via health_boot_count() / GETSTATS for reset detection. */
+    glBootCount++;
 
     /* Level 5 — enable the FX3 hardware watchdog.  Main loop must call
      * health_pet() at least every HWDT_PERIOD_MS to keep the device
      * alive; see RunApplication.c.  Requires CyU3PDeviceInit to have
      * been called (it has, by main() in StartUp.c before us). */
     CyU3PSysWatchDogConfigure(CyTrue, HWDT_PERIOD_MS);
+}
+
+uint32_t health_boot_count(void)
+{
+    return glBootCount;
 }
 
 void health_pet(void)
