@@ -118,22 +118,17 @@ void MsgParsing(uint32_t qevent)
 }
 
 /* Periodic health work — must run from every main-loop iteration in
- * BOTH wait-for-enumeration and run-forever loops.  Pets the HWDT
- * (Level 5) and evaluates / recovers EP0 wedges (Level 4) — without
- * this in both places, an EP0 hang during USB enumeration is
- * unrecoverable because ApplicationThread never reaches the
- * post-enumeration loop where the check used to live exclusively.
- * (PR #110 review feedback, May 2026.) */
+ * BOTH wait-for-enumeration and run-forever loops, so EP0 hangs
+ * during USB enumeration are caught too.  Level 5 (HWDT) pet runs
+ * separately on a ThreadX timer set up in health_init(); we don't
+ * pet it from here. */
 static void health_tick(void)
 {
-	health_pet();
+	health_status_t hs = health_evaluate();
+	if (hs != HEALTH_OK)
 	{
-		health_status_t hs = health_evaluate();
-		if (hs != HEALTH_OK)
-		{
-			DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
-			health_recover(hs);
-		}
+		DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
+		health_recover(hs);
 	}
 }
 

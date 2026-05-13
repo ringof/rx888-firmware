@@ -29,40 +29,29 @@
  * before we hard-reset. */
 #define EP0_HANDLER_TIMEOUT_MS  2000
 
-/* FX3 hardware watchdog timer period.  The main thread pets every
- * ~100 ms (one per ThreadSleep iteration), so 10 s is ~100x safety
- * margin against transient processing delays.  Short enough that a
- * true catastrophic main-thread hang gets reset within ~10 s.  Used
- * in CyU3PSysWatchDogConfigure(); see SDK docs for hardware details. */
-#define HWDT_PERIOD_MS  10000
+/* Phase 3 of the HWDT bisection.
+ *
+ * Phase 1 (caabaf4, both off): 1-hour soak clean.  Confirmed touching
+ *   the WD register is the trigger.
+ * Phase 2 (178f93d, Configure off / Clear from main loop): planned but
+ *   superseded — Infineon KB223337 documents a fundamentally different
+ *   pattern than what we were testing.
+ * Phase 3 (this commit): implement the KB-documented pattern verbatim.
+ *
+ * Per KB223337 the watchdog is petted by a ThreadX timer callback,
+ * NOT by the main thread.  Pet frequency is ~3 sec, WD period ~5 sec
+ * (our previous broken approach used 100 ms / 10 sec — pet was 30x
+ * more often than recommended).  The clock-domain story explains why
+ * register-write frequency might matter: with no external 32 KHz,
+ * the WD clock is derived from SYS_CLK, the same clock driving
+ * GPIF/DMA.  Per-pet contention scales with pet frequency.
+ *
+ * Set HEALTH_HWDT_ENABLED=0 to skip all WD activity (matches the
+ * Phase 1 clean baseline). */
+#define HEALTH_HWDT_ENABLED      1
 
-/* Bisection knobs (issue: PR 3 1-hour soak introduced a streaming-dead
- * regression at ~cycle 900 that wasn't present on PR 2 firmware).
- *
- * Phase 1 result: with both flags 0 (no HWDT activity at all), 1-hour
- * soak was clean.  Confirms touching the WD register is the trigger.
- *
- * Phase 2: split into two flags so we can identify whether the trigger
- * is the one-time Configure call at boot, the periodic Clear call from
- * the main loop, or both.
- *
- *   HEALTH_HWDT_CONFIG  guards CyU3PSysWatchDogConfigure() in health_init().
- *   HEALTH_HWDT_PET     guards CyU3PSysWatchDogClear()    in health_pet().
- *
- * Useful states to test:
- *   CONFIG=0, PET=0  -> known clean (baseline, Phase 1).
- *   CONFIG=0, PET=1  -> Clear-only.  Tests whether the register write
- *                       has a side effect even with WD disabled.
- *                       Clean -> Configure is the culprit.
- *                       Broken -> Clear has hidden side effects.
- *   CONFIG=1, PET=1  -> known broken (original PR 3).
- *   CONFIG=1, PET=0  -> Configure-only.  Causes auto-reset every
- *                       HWDT_PERIOD_MS — not useful unless period is
- *                       set very long.
- *
- * Current probe state: CONFIG=0, PET=1 (test the Clear side-effect). */
-#define HEALTH_HWDT_CONFIG  0
-#define HEALTH_HWDT_PET     1
+#define HWDT_PERIOD_MS           5000   /* Per KB223337. */
+#define HWDT_CLEAR_PERIOD_MS     3000   /* Per KB223337; must be < HWDT_PERIOD_MS. */
 
 /* Accumulated state inspected by health_evaluate().  Written by the
  * USB callback thread, read by the main loop.  Single-byte/word
@@ -80,6 +69,18 @@ static struct {
  * cycle).  No NVRAM persistence; cold boot resets to 0. */
 static uint32_t glBootCount = 0;
 
+/* ThreadX timer used to pet the HWDT.  Per KB223337 the pet must
+ * happen from a timer callback context, not from the main thread. */
+#if HEALTH_HWDT_ENABLED
+static CyU3PTimer glWdClearTimer;
+
+static void health_wd_clear_cb(uint32_t param)
+{
+    (void)param;
+    CyU3PSysWatchDogClear();
+}
+#endif
+
 void health_init(void)
 {
     glHealthState.ep0_handler_enter_ms = 0;
@@ -89,30 +90,25 @@ void health_init(void)
      * Exposed via health_boot_count() / GETSTATS for reset detection. */
     glBootCount++;
 
-    /* Level 5 — enable the FX3 hardware watchdog.  Main loop must call
-     * health_pet() at least every HWDT_PERIOD_MS to keep the device
-     * alive; see RunApplication.c.  Requires CyU3PDeviceInit to have
-     * been called (it has, by main() in StartUp.c before us). */
-#if HEALTH_HWDT_CONFIG
+#if HEALTH_HWDT_ENABLED
+    /* Level 5 — enable the FX3 hardware watchdog and create a
+     * ThreadX timer to pet it.  Per Infineon KB223337 the pet must
+     * come from a timer callback (not the main thread), and at a
+     * rate well below the WD period.  Requires CyU3PDeviceInit to
+     * have already run (it has — StartUp.c invokes it before us). */
     CyU3PSysWatchDogConfigure(CyTrue, HWDT_PERIOD_MS);
+    (void)CyU3PTimerCreate(&glWdClearTimer,
+                           health_wd_clear_cb,
+                           0,                       /* callback arg (unused) */
+                           HWDT_CLEAR_PERIOD_MS,    /* initialTicks */
+                           HWDT_CLEAR_PERIOD_MS,    /* rescheduleTicks (periodic) */
+                           CYU3P_AUTO_ACTIVATE);
 #endif
 }
 
 uint32_t health_boot_count(void)
 {
     return glBootCount;
-}
-
-void health_pet(void)
-{
-    /* Level 5 — keep the FX3 hardware watchdog from firing.  This is
-     * a single register write; cheap.  Called from every main-loop
-     * iteration in RunApplication.c (both wait-for-enumeration and
-     * run-forever loops).  Gated by HEALTH_HWDT_PET so the bisection
-     * can isolate the Clear-side effect from the Configure call. */
-#if HEALTH_HWDT_PET
-    CyU3PSysWatchDogClear();
-#endif
 }
 
 void health_record_event(health_event_t event)

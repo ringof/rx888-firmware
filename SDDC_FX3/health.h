@@ -51,12 +51,11 @@ typedef enum {
  * timer (Level 5 catastrophic backstop) — see PLAN_RECOVERY.md §4. */
 void health_init(void);
 
-/* Pet the FX3 hardware watchdog.  Must be called more frequently than
- * the configured HWDT period (10 s) from any loop that runs while the
- * application is supposed to be alive — i.e. both the main run-forever
- * loop AND the wait-for-enumeration loop.  If the main thread itself
- * stops calling this, HWDT fires and the device hard-resets. */
-void health_pet(void);
+/* HWDT pet is handled internally by a ThreadX timer set up in
+ * health_init() — per Infineon KB223337 the documented pattern is a
+ * timer-callback Clear, not a main-thread call.  Callers should not
+ * pet the watchdog directly; if the main thread is alive enough to
+ * service the timer, HWDT stays satisfied. */
 
 /* Read the boot counter — incremented once per firmware boot inside
  * health_init().  Exposed via GETSTATS so the host can detect that the
