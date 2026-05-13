@@ -4337,6 +4337,74 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     return 0;
 }
 
+/* When the soak's health check returns LIBUSB_ERROR_NO_DEVICE, the
+ * handle may be stale — the device reset and re-enumerated as the
+ * same APP PID 0x00F1 but a different USB bus address, invalidating
+ * the prior libusb handle.  This is the expected outcome of
+ * test_health_recovery / test_main_recovery succeeding (and of
+ * RESETFX3, and of HWDT firing in field conditions).
+ *
+ * Try to re-acquire: close the stale handle, look for the device at
+ * APP PID, replace *h_inout if found, and report 0.  If not at APP
+ * PID, the device may be in bootloader; try to re-upload firmware
+ * via the existing helper.  Return -1 only if the device is truly
+ * inaccessible (no APP PID, no bootloader PID, or upload fails). */
+static int soak_try_reacquire(libusb_device_handle **h_inout)
+{
+    if (*h_inout) {
+        libusb_close(*h_inout);
+        *h_inout = NULL;
+    }
+
+    /* Brief settle — re-enumeration takes a moment. */
+    usleep(500000);
+
+    libusb_device_handle *fresh =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (fresh) {
+        /* Stale handle replaced; device is alive at APP PID. */
+        printf("# soak: re-acquired handle at APP PID 0x%04X\n",
+               RX888_PID_APP);
+        *h_inout = fresh;
+        return 0;
+    }
+
+    /* Not at APP PID — check bootloader.  This happens when the
+     * device just reset (e.g. HWDT fired) and no host-side test
+     * re-uploaded firmware.  If we have g_firmware_path or a
+     * fallback, re-upload and re-acquire. */
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (bl) {
+        libusb_close(bl);
+        const char *fw = g_firmware_path;
+        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+        if (!fw || access(fw, R_OK) != 0) {
+            if (access(fallback, R_OK) == 0) fw = fallback;
+        }
+        if (!fw) {
+            printf("# soak: device at bootloader PID but no firmware "
+                   "available to re-upload (use -F or place the image "
+                   "at ../SDDC_FX3/SDDC_FX3.img)\n");
+            return -1;
+        }
+        if (upload_firmware(g_ctx, fw) != 0) {
+            printf("# soak: device at bootloader PID; re-upload failed\n");
+            return -1;
+        }
+        fresh = libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (!fresh) {
+            printf("# soak: device not at APP PID after re-upload\n");
+            return -1;
+        }
+        printf("# soak: re-uploaded firmware and re-acquired handle\n");
+        *h_inout = fresh;
+        return 0;
+    }
+
+    return -1;  /* device not at either PID — truly gone */
+}
+
 /* Soak test outer loop.
  *
  * Parses optional [hours] [seed] from argv, installs a SIGINT handler
@@ -4569,16 +4637,27 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         if (hc == 0) {
             health_pass++;
         } else if (hc == LIBUSB_ERROR_NO_DEVICE) {
-            printf("\nSOAK ABORT: device gone (LIBUSB_ERROR_NO_DEVICE).\n"
-                   "  Last scenario: %s\n"
-                   "  Likely cause: physical disconnect, unrecoverable wedge,\n"
-                   "  or firmware reset (Level 4 / Level 5 HWDT) with no\n"
-                   "  -F <firmware.img> recovery configured for soak.\n"
-                   "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+            /* Stale handle — common after recovery tests, RESETFX3, or
+             * any scenario that causes the device to re-enumerate.
+             * Try to re-acquire before declaring the device gone. */
+            printf("# soak: NO_DEVICE after '%s'; attempting to re-acquire...\n",
                    scenarios[sel].name);
-            health_fail++;
-            soak_stop = 1;
-            break;
+            if (soak_try_reacquire(&h) == 0 &&
+                soak_health_check(h, &prev_stats) == 0) {
+                health_pass++;
+            } else {
+                printf("\nSOAK ABORT: device gone after '%s' and re-acquire "
+                       "failed.\n"
+                       "  Likely cause: physical disconnect, unrecoverable "
+                       "wedge, or firmware reset with no usable firmware\n"
+                       "  image to re-upload (use -F <firmware.img> or put "
+                       "the image at ../SDDC_FX3/SDDC_FX3.img).\n"
+                       "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+                       scenarios[sel].name);
+                health_fail++;
+                soak_stop = 1;
+                break;
+            }
         } else {
             /* Device unhealthy — give the watchdog time to finish,
              * then retry once before moving on. */
@@ -4587,13 +4666,19 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
             if (hc2 == 0) {
                 health_pass++;
             } else if (hc2 == LIBUSB_ERROR_NO_DEVICE) {
-                printf("\nSOAK ABORT: device gone (LIBUSB_ERROR_NO_DEVICE) after retry.\n"
-                       "  Last scenario: %s\n"
-                       "  Recover with:  ./fx3_cmd load <firmware.img>\n",
-                       scenarios[sel].name);
-                health_fail++;
-                soak_stop = 1;
-                break;
+                printf("# soak: NO_DEVICE after retry; attempting to re-acquire...\n");
+                if (soak_try_reacquire(&h) == 0 &&
+                    soak_health_check(h, &prev_stats) == 0) {
+                    health_pass++;
+                } else {
+                    printf("\nSOAK ABORT: device gone after retry and re-acquire "
+                           "failed.\n  Last scenario: %s\n"
+                           "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+                           scenarios[sel].name);
+                    health_fail++;
+                    soak_stop = 1;
+                    break;
+                }
             } else {
                 health_fail++;
             }
