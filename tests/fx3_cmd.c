@@ -4289,7 +4289,13 @@ struct soak_scenario {
 /* Run between every soak scenario.  Probes TESTFX3 (device alive,
  * hwconfig unchanged) and GETSTATS (GPIF state sane), storing the
  * latest stats snapshot in *prev for the status-line report.
- * Returns 0 on pass, 1 on fail. */
+ * Returns:
+ *   0                            on pass
+ *   LIBUSB_ERROR_NO_DEVICE       on definitive disconnect — caller
+ *                                must abort the soak; further calls
+ *                                will only cascade.
+ *   1                            on other (potentially transient)
+ *                                failure — caller may retry. */
 static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
 {
     /* TESTFX3 — device alive, hwconfig still 0x04 */
@@ -4297,6 +4303,7 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     if (r < 0) {
         printf("HEALTH FAIL: TESTFX3 failed: %s\n", libusb_strerror(r));
+        if (r == LIBUSB_ERROR_NO_DEVICE) return LIBUSB_ERROR_NO_DEVICE;
         return 1;
     }
     if (r >= 1 && info[0] != 0x04) {
@@ -4309,6 +4316,7 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     r = read_stats(h, &s);
     if (r < 0) {
         printf("HEALTH FAIL: GETSTATS: %s\n", libusb_strerror(r));
+        if (r == LIBUSB_ERROR_NO_DEVICE) return LIBUSB_ERROR_NO_DEVICE;
         return 1;
     }
 
@@ -4536,15 +4544,42 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         /* Health check — retry once on failure.  After a scenario
          * triggers a watchdog recovery, the device may need up to ~2s
          * to finish.  Rather than penalise the next scenario with a
-         * broken device, absorb the delay here. */
-        if (soak_health_check(h, &prev_stats) == 0) {
+         * broken device, absorb the delay here.
+         *
+         * Special-case LIBUSB_ERROR_NO_DEVICE: the device handle is
+         * definitively invalid (physical disconnect, unrecoverable
+         * firmware wedge, or HWDT/Level-4 reset without a host-side
+         * re-upload).  Further scenarios will only cascade NO_DEVICE
+         * failures; abort the soak with the summary so far. */
+        int hc = soak_health_check(h, &prev_stats);
+        if (hc == 0) {
             health_pass++;
+        } else if (hc == LIBUSB_ERROR_NO_DEVICE) {
+            printf("\nSOAK ABORT: device gone (LIBUSB_ERROR_NO_DEVICE).\n"
+                   "  Last scenario: %s\n"
+                   "  Likely cause: physical disconnect, unrecoverable wedge,\n"
+                   "  or firmware reset (Level 4 / Level 5 HWDT) with no\n"
+                   "  -F <firmware.img> recovery configured for soak.\n"
+                   "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+                   scenarios[sel].name);
+            health_fail++;
+            soak_stop = 1;
+            break;
         } else {
             /* Device unhealthy — give the watchdog time to finish,
              * then retry once before moving on. */
             usleep(2000000);       /* 2 s recovery window */
-            if (soak_health_check(h, &prev_stats) == 0) {
+            int hc2 = soak_health_check(h, &prev_stats);
+            if (hc2 == 0) {
                 health_pass++;
+            } else if (hc2 == LIBUSB_ERROR_NO_DEVICE) {
+                printf("\nSOAK ABORT: device gone (LIBUSB_ERROR_NO_DEVICE) after retry.\n"
+                       "  Last scenario: %s\n"
+                       "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+                       scenarios[sel].name);
+                health_fail++;
+                soak_stop = 1;
+                break;
             } else {
                 health_fail++;
             }
