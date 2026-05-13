@@ -4636,6 +4636,26 @@ static int do_test_health_recovery(libusb_device_handle *h)
         return 1;
     }
 
+    /* Resolve firmware path early so a missing/bad path fails BEFORE we
+     * trip the watchdog and leave the device in bootloader.  Try the
+     * given path first; fall back to a conventional relative location
+     * when invoked from tests/ (where ../SDDC_FX3/SDDC_FX3.img is the
+     * usual layout). */
+    const char *fw = g_firmware_path;
+    if (access(fw, R_OK) != 0) {
+        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+        if (access(fallback, R_OK) == 0) {
+            printf("# firmware path '%s' not readable here; using fallback '%s'\n",
+                   fw, fallback);
+            fw = fallback;
+        } else {
+            printf("FAIL test_health_recovery: firmware path '%s' not readable "
+                   "(also tried '%s').  Use -F <firmware.img> with a path that "
+                   "resolves from your current working directory.\n", fw, fallback);
+            return 1;
+        }
+    }
+
     printf("# test_health_recovery: issuing HANGFX3(5000 ms)\n");
     printf("#   expected: host libusb times out at %d ms, firmware watchdog\n",
            CTRL_TIMEOUT_MS);
@@ -4688,8 +4708,11 @@ static int do_test_health_recovery(libusb_device_handle *h)
     printf("# device found at bootloader PID — health watchdog fired correctly\n");
 
     /* 5. Re-upload firmware via the existing upload_firmware helper */
-    if (upload_firmware(g_ctx, g_firmware_path) != 0) {
-        printf("FAIL test_health_recovery: firmware re-upload failed\n");
+    if (upload_firmware(g_ctx, fw) != 0) {
+        printf("FAIL test_health_recovery: firmware re-upload failed.\n"
+               "#   Device is in bootloader mode (PID 0x%04X).  Recover with:\n"
+               "#       ./fx3_cmd load <path-to-SDDC_FX3.img>\n",
+               RX888_PID_BOOT);
         return 1;
     }
 
