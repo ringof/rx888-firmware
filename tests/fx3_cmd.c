@@ -4423,9 +4423,16 @@ static int soak_try_reacquire(libusb_device_handle **h_inout)
  *   3. Health check (TESTFX3 + GETSTATS)
  *   4. Update per-scenario and cumulative stats
  *   5. Print status line every 10 cycles
- * Prints a final summary table on exit.  Returns 0 if all passed. */
-static int soak_main(libusb_device_handle *h, int argc, char **argv)
+ * Prints a final summary table on exit.  Returns 0 if all passed.
+ *
+ * Takes a pointer-to-pointer for the device handle so that handle
+ * replacements from soak_try_reacquire() (which closes the stale
+ * handle and opens a fresh one) propagate back to main()'s cleanup
+ * path.  Without this, main()'s close_rx888(h) would operate on a
+ * stale (already-closed) pointer after any re-acquire. */
+static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
 {
+    libusb_device_handle *h = *h_inout;
     double hours = 1.0;
     unsigned int seed = (unsigned int)time(NULL);
     int max_scenarios = 0;   /* 0 = unlimited (run until time expires) */
@@ -4527,6 +4534,7 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
     memset(&prev_stats, 0, sizeof(prev_stats));
     if (soak_health_check(h, &prev_stats) != 0) {
         printf("SOAK ABORT: initial health check failed\n");
+        *h_inout = h;  /* propagate (no re-acquire happened, but keep callers honest) */
         return 1;
     }
 
@@ -4749,6 +4757,11 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         printf("\nResult: ALL PASSED (%d cycles)\n", total_cycles);
     }
 
+    /* Propagate any re-acquired handle back to the caller's local
+     * so main()'s out: cleanup operates on the live pointer, not a
+     * stale one closed by soak_try_reacquire().  See PR #112 review
+     * thread r3236353947. */
+    *h_inout = h;
     return total_fail > 0 ? 1 : 0;
 }
 
@@ -5449,7 +5462,10 @@ int main(int argc, char **argv)
         rc = do_test_watchdog_race(h, rnds);
 
     } else if (strcmp(cmd, "soak") == 0) {
-        rc = soak_main(h, argc - 2, argv + 2);
+        /* Pass &h so soak_try_reacquire() (which closes and replaces
+         * the handle on stale-NO_DEVICE recovery) can propagate the
+         * fresh handle back here for the out: cleanup. */
+        rc = soak_main(&h, argc - 2, argv + 2);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);
