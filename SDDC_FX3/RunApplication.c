@@ -117,6 +117,26 @@ void MsgParsing(uint32_t qevent)
 	}
 }
 
+/* Periodic health work — must run from every main-loop iteration in
+ * BOTH wait-for-enumeration and run-forever loops.  Pets the HWDT
+ * (Level 5) and evaluates / recovers EP0 wedges (Level 4) — without
+ * this in both places, an EP0 hang during USB enumeration is
+ * unrecoverable because ApplicationThread never reaches the
+ * post-enumeration loop where the check used to live exclusively.
+ * (PR #110 review feedback, May 2026.) */
+static void health_tick(void)
+{
+	health_pet();
+	{
+		health_status_t hs = health_evaluate();
+		if (hs != HEALTH_OK)
+		{
+			DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
+			health_recover(hs);
+		}
+	}
+}
+
 void ApplicationThread ( uint32_t input)
 {
 	// input is passed to this routine from CyU3PThreadCreate, useful if the same code is used for multiple threads
@@ -192,7 +212,7 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for USB CallBack Events every 100msec
 	    		CyU3PThreadSleep(100);
-				health_pet();  /* Level 5 HWDT — main thread is alive */
+				health_tick();  /* Level 4 + 5 watchdog, must run pre-enum too */
 				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
 						MsgParsing(glQevent);
@@ -205,7 +225,7 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for User Commands (and other CallBack Events) every 100msec
 				CyU3PThreadSleep(100);
-				health_pet();  /* Level 5 HWDT — main thread is alive */
+				health_tick();  /* Level 4 + 5 watchdog */
 				nline =0;
 				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 				{
@@ -312,20 +332,6 @@ void ApplicationThread ( uint32_t input)
 								prevDMACount, curDMA);
 						stallCount = 0;
 						prevDMACount = curDMA;
-					}
-				}
-
-				/* Health watchdog (Level 4 backstop, issues #104, #105).
-				 * Evaluated outside the glIsApplnActive check so EP0
-				 * hangs during enumeration are caught too.  On
-				 * HEALTH_WEDGED_EP0, health_recover() calls
-				 * CyU3PDeviceReset() — that does not return. */
-				{
-					health_status_t hs = health_evaluate();
-					if (hs != HEALTH_OK)
-					{
-						DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
-						health_recover(hs);
 					}
 				}
 
