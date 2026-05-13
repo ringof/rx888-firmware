@@ -186,6 +186,9 @@ CyFxSlFifoApplnUSBSetupCB (
     	/* Reject oversized EP0 data before any GetEP0Data call. */
     	if (wLength > CYFX_SDRAPP_MAX_EP0LEN) {
     		CyU3PUsbStall(0, CyTrue, CyFalse);
+    		/* Match the ENTER recorded at the top of this function so the
+    		 * health watchdog doesn't see an apparent stuck handler. */
+    		health_record_event(HEALTH_EVENT_EP0_HANDLER_EXIT);
     		return CyTrue;
     	}
 
