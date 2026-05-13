@@ -36,13 +36,33 @@
  * in CyU3PSysWatchDogConfigure(); see SDK docs for hardware details. */
 #define HWDT_PERIOD_MS  10000
 
-/* Bisection knob (issue: PR 3 1-hour soak introduced a streaming-dead
+/* Bisection knobs (issue: PR 3 1-hour soak introduced a streaming-dead
  * regression at ~cycle 900 that wasn't present on PR 2 firmware).
- * Set to 0 to skip BOTH the CyU3PSysWatchDogConfigure() call in
- * health_init() AND the CyU3PSysWatchDogClear() calls in health_pet()
- * — so the WD register isn't touched at all.  Flip back to 1 once
- * the bisection is complete. */
-#define HEALTH_HWDT_ENABLED  0
+ *
+ * Phase 1 result: with both flags 0 (no HWDT activity at all), 1-hour
+ * soak was clean.  Confirms touching the WD register is the trigger.
+ *
+ * Phase 2: split into two flags so we can identify whether the trigger
+ * is the one-time Configure call at boot, the periodic Clear call from
+ * the main loop, or both.
+ *
+ *   HEALTH_HWDT_CONFIG  guards CyU3PSysWatchDogConfigure() in health_init().
+ *   HEALTH_HWDT_PET     guards CyU3PSysWatchDogClear()    in health_pet().
+ *
+ * Useful states to test:
+ *   CONFIG=0, PET=0  -> known clean (baseline, Phase 1).
+ *   CONFIG=0, PET=1  -> Clear-only.  Tests whether the register write
+ *                       has a side effect even with WD disabled.
+ *                       Clean -> Configure is the culprit.
+ *                       Broken -> Clear has hidden side effects.
+ *   CONFIG=1, PET=1  -> known broken (original PR 3).
+ *   CONFIG=1, PET=0  -> Configure-only.  Causes auto-reset every
+ *                       HWDT_PERIOD_MS — not useful unless period is
+ *                       set very long.
+ *
+ * Current probe state: CONFIG=0, PET=1 (test the Clear side-effect). */
+#define HEALTH_HWDT_CONFIG  0
+#define HEALTH_HWDT_PET     1
 
 /* Accumulated state inspected by health_evaluate().  Written by the
  * USB callback thread, read by the main loop.  Single-byte/word
@@ -73,7 +93,7 @@ void health_init(void)
      * health_pet() at least every HWDT_PERIOD_MS to keep the device
      * alive; see RunApplication.c.  Requires CyU3PDeviceInit to have
      * been called (it has, by main() in StartUp.c before us). */
-#if HEALTH_HWDT_ENABLED
+#if HEALTH_HWDT_CONFIG
     CyU3PSysWatchDogConfigure(CyTrue, HWDT_PERIOD_MS);
 #endif
 }
@@ -88,10 +108,9 @@ void health_pet(void)
     /* Level 5 — keep the FX3 hardware watchdog from firing.  This is
      * a single register write; cheap.  Called from every main-loop
      * iteration in RunApplication.c (both wait-for-enumeration and
-     * run-forever loops).  Gated by HEALTH_HWDT_ENABLED so the
-     * bisection probe doesn't touch the WD register at all when
-     * disabled. */
-#if HEALTH_HWDT_ENABLED
+     * run-forever loops).  Gated by HEALTH_HWDT_PET so the bisection
+     * can isolate the Clear-side effect from the Configure call. */
+#if HEALTH_HWDT_PET
     CyU3PSysWatchDogClear();
 #endif
 }
