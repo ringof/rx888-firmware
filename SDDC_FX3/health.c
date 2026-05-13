@@ -36,6 +36,15 @@
  * in CyU3PSysWatchDogConfigure(); see SDK docs for hardware details. */
 #define HWDT_PERIOD_MS  10000
 
+/* Bisection knob (issue: PR 3 1-hour soak introduced a streaming-dead
+ * regression at ~cycle 900 that wasn't present on PR 2 firmware).
+ * Set to 0 to skip CyU3PSysWatchDogConfigure() in health_init() so we
+ * can isolate whether HWDT enablement is the trigger.  health_pet()
+ * still calls CyU3PSysWatchDogClear() — that's a single register write
+ * and is harmless when HWDT isn't enabled.  Flip back to 1 once the
+ * bisection is complete. */
+#define HEALTH_HWDT_ENABLED  0
+
 /* Accumulated state inspected by health_evaluate().  Written by the
  * USB callback thread, read by the main loop.  Single-byte/word
  * accesses are atomic on ARM926; volatile prevents compiler reordering.
@@ -65,7 +74,9 @@ void health_init(void)
      * health_pet() at least every HWDT_PERIOD_MS to keep the device
      * alive; see RunApplication.c.  Requires CyU3PDeviceInit to have
      * been called (it has, by main() in StartUp.c before us). */
+#if HEALTH_HWDT_ENABLED
     CyU3PSysWatchDogConfigure(CyTrue, HWDT_PERIOD_MS);
+#endif
 }
 
 uint32_t health_boot_count(void)
