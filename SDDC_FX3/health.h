@@ -32,17 +32,18 @@
 #include "cyu3types.h"
 
 /* Liveness events recorded by callers.  Add new event types here as
- * new failure modes are addressed.  Stub set until PR 2. */
+ * new failure modes are addressed. */
 typedef enum {
-    HEALTH_EVENT_NONE = 0   /* placeholder; remove when first real event lands */
+    HEALTH_EVENT_EP0_HANDLER_ENTER = 0,  /* USB vendor callback entered */
+    HEALTH_EVENT_EP0_HANDLER_EXIT,       /* USB vendor callback returned */
 } health_event_t;
 
 /* Health status returned by health_evaluate().  Add new wedged-*
- * statuses as recovery cascade levels are implemented.  Stub set
- * until PR 2. */
+ * statuses as recovery cascade levels are implemented. */
 typedef enum {
     HEALTH_OK = 0,
-    HEALTH_WEDGED_UNKNOWN    /* placeholder for unidentified wedge */
+    HEALTH_WEDGED_EP0,        /* Vendor callback hung in SDK call (issue #104, #105) */
+    HEALTH_WEDGED_UNKNOWN,    /* Unidentified wedge — fall-through case */
 } health_status_t;
 
 /* One-time initialization.  Called once at firmware boot before any

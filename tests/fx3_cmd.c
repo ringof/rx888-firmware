@@ -56,6 +56,9 @@
 #define SETARGFX3     0xB6
 #define TUNERSTDBY    0xB8
 #define READINFODEBUG 0xBA
+#define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
+                              * used by test_health_recovery to trip the
+                              * firmware health watchdog (#104, #105). */
 
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
@@ -68,6 +71,7 @@
 /* Global libusb context — needed by primed_start_and_read() for
  * libusb_handle_events_timeout_completed().  Set once in main(). */
 static libusb_context *g_ctx;
+static const char *g_firmware_path = NULL;  /* set from -F option in main() */
 
 /* ------------------------------------------------------------------ */
 /* USB helpers (patterns from rx888_stream.c)                         */
@@ -528,6 +532,7 @@ static int do_test_adc_freq_extremes(libusb_device_handle *h);
 static int do_test_data_sanity(libusb_device_handle *h);
 static int do_test_gpif_soft_stop(libusb_device_handle *h);
 static int do_test_stop_under_backpressure(libusb_device_handle *h);
+static int do_test_health_recovery(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -581,6 +586,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"data_sanity",      do_test_data_sanity},
     {"gpif_soft_stop",   do_test_gpif_soft_stop},
     {"stop_under_backpressure", do_test_stop_under_backpressure},
+    {"test_health_recovery", do_test_health_recovery},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -628,6 +634,7 @@ static void print_local_help(void)
            "  data_sanity                   Bulk data corruption check\n"
            "  gpif_soft_stop                Verify SM lands in IDLE (needs new waveform)\n"
            "  stop_under_backpressure       STOP while DMA buffers full\n"
+           "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -3610,19 +3617,18 @@ static int do_test_watchdog_cap_restart(libusb_device_handle *h)
     /* Wait for watchdog to hit cap */
     sleep(5);
 
-    /* STOP then restart (clean path) */
+    /* STOP then restart (clean path).  Use the primed retry primitive
+     * (queues bulk TD before STARTFX3, recovers from xHCI EP1 error
+     * state via clear_halt) — same pattern as wedge_recovery and
+     * sustained_stream.  The unprimed bulk_read_some that lived here
+     * before races the GPIF producer at 64 MS/s and lands the host
+     * xHCI endpoint in an error state on every other run (bistable
+     * 50/50 alternation).  The firmware is innocent; the test was the
+     * outlier among streaming-recovery scenarios. */
     cmd_u32(h, STOPFX3, 0);
     usleep(200000);
 
-    r = cmd_u32(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL watchdog_cap_restart: STARTFX3 #2 after cap: %s\n",
-               libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 5);
-        return 1;
-    }
-
-    int got = bulk_read_some(h, 16384, 2000);
+    int got = primed_start_and_read_retry(h, 16384, 2000);
     cmd_u32(h, STOPFX3, 0);
     set_arg(h, WDG_MAX_RECOV, 5);
 
@@ -4597,6 +4603,140 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ */
+/* test_health_recovery — end-to-end validation of health.c Level-4    */
+/*                                                                     */
+/* Issues HANGFX3(wValue=5000) which deterministically wedges the EP0  */
+/* vendor callback for 5 seconds (the handler does CyU3PThreadSleep).  */
+/* The firmware health watchdog should detect the hang at              */
+/* EP0_HANDLER_TIMEOUT_MS (~2s) and call CyU3PDeviceReset(CyFalse),    */
+/* which drops USB and leaves the device in bootloader mode.  Test     */
+/* verifies device re-enumerates to bootloader, re-uploads firmware,   */
+/* and confirms normal operation resumes.                              */
+/*                                                                     */
+/* Requires -F <firmware.img> on the fx3_cmd command line so the test  */
+/* can re-upload after the reset.  Issues #104, #105.                  */
+/* ------------------------------------------------------------------ */
+static int do_test_health_recovery(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[4];
+
+    /* 1. Confirm device is healthy before the test */
+    r = ctrl_read(h, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        printf("FAIL test_health_recovery: precheck TESTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    if (!g_firmware_path) {
+        printf("FAIL test_health_recovery: requires -F <firmware.img> "
+               "to re-upload after watchdog reset\n");
+        return 1;
+    }
+
+    /* Resolve firmware path early so a missing/bad path fails BEFORE we
+     * trip the watchdog and leave the device in bootloader.  Try the
+     * given path first; fall back to a conventional relative location
+     * when invoked from tests/ (where ../SDDC_FX3/SDDC_FX3.img is the
+     * usual layout). */
+    const char *fw = g_firmware_path;
+    if (access(fw, R_OK) != 0) {
+        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+        if (access(fallback, R_OK) == 0) {
+            printf("# firmware path '%s' not readable here; using fallback '%s'\n",
+                   fw, fallback);
+            fw = fallback;
+        } else {
+            printf("FAIL test_health_recovery: firmware path '%s' not readable "
+                   "(also tried '%s').  Use -F <firmware.img> with a path that "
+                   "resolves from your current working directory.\n", fw, fallback);
+            return 1;
+        }
+    }
+
+    printf("# test_health_recovery: issuing HANGFX3(5000 ms)\n");
+    printf("#   expected: host libusb times out at %d ms, firmware watchdog\n",
+           CTRL_TIMEOUT_MS);
+    printf("#   fires at ~2 s, device re-enumerates to bootloader PID 0x%04X\n",
+           RX888_PID_BOOT);
+
+    /* 2. Issue HANGFX3 with wValue=5000 (5 second hang).  No data phase. */
+    r = libusb_control_transfer(
+        h,
+        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+        HANGFX3, 5000, 0, NULL, 0, CTRL_TIMEOUT_MS);
+
+    /* Expected: TIMEOUT because firmware is wedged in CyU3PThreadSleep
+     * and never ACKs the SETUP.  Any other result means the hang didn't
+     * happen — either HANGFX3 isn't wired up (firmware needs flashing)
+     * or the firmware completed the sleep faster than 1 s. */
+    if (r != LIBUSB_ERROR_TIMEOUT) {
+        printf("FAIL test_health_recovery: HANGFX3 expected LIBUSB_ERROR_TIMEOUT, "
+               "got %d (%s)\n", r, libusb_strerror(r));
+        return 1;
+    }
+    printf("# HANGFX3 returned TIMEOUT as expected; waiting for watchdog reset...\n");
+
+    /* 3. Wait for firmware health watchdog to fire and reset device.
+     * Watchdog timeout 2000 ms + 100 ms poll cadence + USB re-enumeration
+     * settle ~1-2 s = ~4 s total worst-case. */
+    sleep(4);
+
+    /* 4. Verify device is in bootloader mode — proof that
+     * CyU3PDeviceReset() fired from health_recover(WEDGED_EP0). */
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (!bl) {
+        /* Try app PID just in case timing was off and it came back fast */
+        libusb_device_handle *app =
+            libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (app) {
+            libusb_close(app);
+            printf("FAIL test_health_recovery: device found at APP PID, not "
+                   "bootloader — watchdog may not have fired, or firmware "
+                   "came back without bootloader transition\n");
+        } else {
+            printf("FAIL test_health_recovery: device not visible at either PID "
+                   "after 4 s wait — watchdog did not reset, or device "
+                   "is in a deeper wedge state requiring USB power-cycle\n");
+        }
+        return 1;
+    }
+    libusb_close(bl);
+    printf("# device found at bootloader PID — health watchdog fired correctly\n");
+
+    /* 5. Re-upload firmware via the existing upload_firmware helper */
+    if (upload_firmware(g_ctx, fw) != 0) {
+        printf("FAIL test_health_recovery: firmware re-upload failed.\n"
+               "#   Device is in bootloader mode (PID 0x%04X).  Recover with:\n"
+               "#       ./fx3_cmd load <path-to-SDDC_FX3.img>\n",
+               RX888_PID_BOOT);
+        return 1;
+    }
+
+    /* 6. Verify normal operation resumes */
+    libusb_device_handle *running =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (!running) {
+        printf("FAIL test_health_recovery: device not at APP PID after re-upload\n");
+        return 1;
+    }
+    r = ctrl_read(running, TESTFX3, 0, 0, buf, 4);
+    libusb_close(running);
+    if (r < 0) {
+        printf("FAIL test_health_recovery: post-recovery TESTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    printf("PASS test_health_recovery: HANGFX3 -> watchdog reset -> bootloader "
+           "-> firmware re-uploaded -> device alive (hwconfig=0x%02X fw=%d.%d)\n",
+           buf[0], buf[1], buf[2]);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -4660,6 +4800,8 @@ static void usage(const char *prog)
         "  abandoned_stream             Simulate host crash (no STOPFX3)\n"
         "  gpif_soft_stop               Verify SM lands in IDLE (needs new waveform)\n"
         "  stop_under_backpressure      STOP while DMA buffers full\n"
+        "  test_health_recovery         HANGFX3 + watchdog reset round-trip (#104, #105;\n"
+        "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
         "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
@@ -4712,6 +4854,9 @@ int main(int argc, char **argv)
         return 1;
     }
     g_ctx = ctx;
+    g_firmware_path = firmware_path;  /* tests that re-upload firmware
+                                       * (e.g. test_health_recovery) need
+                                       * this — set NULL if -F not given. */
 
     /* ---- Handle "load" command (upload-only, no app-mode device needed) ---- */
     if (strcmp(cmd, "load") == 0) {
@@ -4915,6 +5060,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stop_under_backpressure") == 0) {
         rc = do_test_stop_under_backpressure(h);
+
+    } else if (strcmp(cmd, "test_health_recovery") == 0) {
+        rc = do_test_health_recovery(h);
 
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);

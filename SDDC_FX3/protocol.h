@@ -23,6 +23,13 @@ enum FX3Command {
     GETSTATS      = 0xB3,   /* Read diagnostic counters (read-only) */
     SETARGFX3     = 0xB6,   /* Set argument by index/value */
     READINFODEBUG = 0xBA,   /* Read debug output / send debug input */
+    HANGFX3       = 0xCE,   /* TEST-ONLY: sleep wValue ms in the EP0 handler
+                             * to deterministically wedge the vendor callback.
+                             * Used by tests/fx3_cmd.c test_health_recovery to
+                             * validate the health watchdog's Level-4 reset
+                             * (issues #104, #105).  Safe in production: the
+                             * watchdog auto-resets the device if invoked
+                             * with wValue >= EP0_HANDLER_TIMEOUT_MS. */
 };
 
 /* GPIO bit masks for GPIOFX3 control word (active-low/high depends on pin) */
