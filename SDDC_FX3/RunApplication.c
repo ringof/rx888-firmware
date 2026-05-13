@@ -13,6 +13,8 @@
 
 #include "Si5351.h"
 
+#include "health.h"
+
 #define R828D_I2C_ADDR		0x74
 
 #include "radio.h"
@@ -311,6 +313,20 @@ void ApplicationThread ( uint32_t input)
 					}
 				}
 
+				/* Health watchdog (Level 4 backstop, issues #104, #105).
+				 * Evaluated outside the glIsApplnActive check so EP0
+				 * hangs during enumeration are caught too.  On
+				 * HEALTH_WEDGED_EP0, health_recover() calls
+				 * CyU3PDeviceReset() — that does not return. */
+				{
+					health_status_t hs = health_evaluate();
+					if (hs != HEALTH_OK)
+					{
+						DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
+						health_recover(hs);
+					}
+				}
+
 #ifndef _DEBUG_USB_  // second count in serial debug
 				if (glDMACount > 7812)
 				{
@@ -335,6 +351,9 @@ void CyFxApplicationDefine (void) {
     // Create any needed resources then the Application thread
     Status = InitializeDebugConsole();
     CheckStatus("Initialize Debug Console", Status);
+
+    // Initialize the recovery state machine (no-op for events not yet wired).
+    health_init();
 
     // Create Queue used to transfer callback messages
         Status = CyU3PQueueCreate(&glEventAvailable, 1, &glEventAvailableQueue, sizeof(glEventAvailableQueue));

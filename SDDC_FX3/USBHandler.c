@@ -16,6 +16,8 @@
 
 #include "radio.h"
 
+#include "health.h"
+
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
 extern void StartApplication(void);
@@ -119,6 +121,10 @@ CyFxSlFifoApplnUSBSetupCB (
     uint16_t wLength;
     CyBool_t isHandled = CyFalse;
     CyU3PReturnStatus_t apiRetStatus;
+
+    /* Liveness: record callback entry for the health watchdog.  Matched
+     * by HEALTH_EVENT_EP0_HANDLER_EXIT at every return path below. */
+    health_record_event(HEALTH_EVENT_EP0_HANDLER_ENTER);
 
     /* Decode the fields from the setup request. */
     bReqType = (setupdat0 & CY_U3P_USB_REQUEST_TYPE_MASK);
@@ -428,6 +434,26 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 
+				/* TEST-ONLY: deterministically wedge the EP0 handler by
+				 * sleeping wValue milliseconds in this thread context.
+				 * The health watchdog (see RunApplication.c + health.c)
+				 * should detect the hang at EP0_HANDLER_TIMEOUT_MS and
+				 * call CyU3PDeviceReset(CyFalse).  Used by the host-side
+				 * test_health_recovery scenario to validate Level-4
+				 * recovery end-to-end.  Issues #104, #105. */
+				case HANGFX3:
+					{
+						uint32_t hang_ms = (uint32_t)wValue;
+						DebugPrint(4, "\r\nHANGFX3: sleeping %u ms (test-only)", hang_ms);
+						CyU3PThreadSleep(hang_ms);
+						/* If we reach here the watchdog did NOT fire — wValue
+						 * was shorter than the timeout.  Acknowledge so the
+						 * host doesn't see a STALL. */
+						CyU3PUsbAckSetup();
+						isHandled = CyTrue;
+					}
+					break;
+
 
 	   case READINFODEBUG:
 					{
@@ -479,6 +505,9 @@ CyFxSlFifoApplnUSBSetupCB (
     	}
     	TraceSerial( bRequest, (uint8_t *) &glEp0Buffer[0], wValue, wIndex);
     }
+    /* Liveness: record callback exit so the health watchdog stops the
+     * timeout window started at HEALTH_EVENT_EP0_HANDLER_ENTER. */
+    health_record_event(HEALTH_EVENT_EP0_HANDLER_EXIT);
     return isHandled;
 }
 
