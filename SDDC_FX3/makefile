@@ -35,6 +35,7 @@ vpath %.c radio
 
 USBSOURCE= cyfxtx.c		\
 	DebugConsole.c		\
+	health.c		\
 	i2cmodule.c		\
 	RunApplication.c	\
 	StartStopApplication.c	\

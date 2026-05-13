@@ -110,49 +110,68 @@ uploads the firmware, and runs an automated test suite.
 
 ## Firmware Robustness
 
-The firmware implements a layered recovery architecture so that
-streaming failures are almost always recoverable without power-cycling
-the device.
+Recovery is owned by a single module — `SDDC_FX3/health.c` — that
+collects liveness signals from across the firmware and applies a
+documented cascade of remedies when the device is unhealthy.  This
+section describes the architecture and the implementation status of
+each cascade level.  See `PLAN_RECOVERY.md` at the repo root for the
+design rationale and PR sequencing.
 
-### GPIF soft-stop
+### Health interface
 
-The GPIF II state machine includes `!FW_TRG` exit transitions on all
-active states that can stall (TH0_RD, TH1_RD, TH0_WAIT, TH1_WAIT).
-When the host issues STOPFX3, the firmware deasserts FW_TRG and the
-state machine exits to IDLE within 3 clock cycles (~47 ns at 64 MHz).
-`CyU3PGpifDisable(CyFalse)` then disables a quiescent machine with no
-DMA debris.  If the SM fails to reach IDLE (e.g. dead external clock),
-the firmware falls back to `CyU3PGpifDisable(CyTrue)` (force-stop).
+Three functions form the contract.  Every recovery contribution goes
+through them — no parallel watchdog mechanisms, no inline cleanup in
+handlers.
 
-### Watchdog recovery
+| Function | Role |
+|---|---|
+| `health_record_event(event)` | Callers observe a liveness event (EP0 callback exit, DMA progress, …) and report it.  Cheap; safe from any thread. |
+| `health_evaluate()` | Pure function called periodically from the main loop.  Examines accumulated state and returns a structured `health_status_t`.  Does not take action. |
+| `health_recover(status)` | Called when evaluation reports unhealthy.  Picks and applies a remedy from the cascade based on the failure reason. |
 
-If the DMA pipeline stalls mid-stream (glDMACount stops advancing while
-the SM is in a BUSY or WAIT state), a watchdog in the main application
-loop detects it after 300 ms.  It tears down the GPIF and DMA channel,
-then rebuilds the pipeline — soft-stop first, force-stop as fallback.
-Recovery is capped at `WDG_MAX_RECOVERY_DEFAULT` (5) attempts per
-session; after that the watchdog waits for the host to issue a new
-STARTFX3.  The cap prevents unbounded recovery loops when the host is
-not draining data (e.g. application crash).
+Adding a new failure-mode detection means adding a new event type and
+a new evaluation branch — not writing a new watchdog.
 
-### Host restart
+### Recovery cascade
 
-STOPFX3 followed by STARTFX3 resets all pipeline state: DMA channels,
-GPIF configuration, counters, and the watchdog recovery cap.  This is
-the heaviest recovery path and provides a clean slate regardless of
-what state the firmware was in.
+| Level | Remedy | Appropriate for | Latency | Status |
+|---|---|---|---|---|
+| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` per `PLAN_RECOVERY.md` §5 PR N) |
+| 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
+| 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
+| 4 | `CyU3PDeviceReset(CyFalse)` | Anything else / catastrophic | full re-enumeration | **Not implemented yet** (target: PR 2, addresses #105) |
+| 5 | FX3 hardware watchdog timer (`CyU3PSysWatchDogConfigure` + periodic pet) | Levels 1–4 themselves wedged | configured period | **Not implemented yet** (target: PR 3) |
 
-### Recovery hierarchy
+### What's covered today
 
-| Layer | Trigger | Action | Latency |
-|-------|---------|--------|---------|
-| Soft-stop | STOPFX3 / watchdog | FW_TRG deassert → SM exits to IDLE | ~1 ms |
-| Force-stop | Soft-stop failure | `CyU3PGpifDisable(CyTrue)` | ~1 ms |
-| Watchdog | DMA stall 300 ms | Tear down + rebuild pipeline | ~300 ms |
-| Host restart | Application decision | STOPFX3 + STARTFX3 | ~100 ms |
+- **Streaming wedges** — DMA producer stuck waiting for the host to
+  drain, GPIF state machine in `TH0_WAIT`/`TH1_WAIT`/`TH0_RD` for
+  >300 ms.  The existing watchdog in `SDDC_FX3/RunApplication.c`
+  detects and recovers; observed reliable across `wedge_recovery`
+  scenarios in `fw_test.sh` and `soak_test.sh`.
 
-Soak testing (500+ randomized cycles) demonstrates 100% health-check
-pass rate and zero device crashes with this architecture.
+### What's not covered yet — known gaps
+
+- **EP0 / vendor-handler hangs** (issue #104, #105).  When a vendor
+  handler such as STOPFX3 hangs inside an FX3 SDK call, EP0 stops
+  responding while USB enumeration remains alive.  Today's watchdog
+  cannot fire (its gating conditions are streaming-specific) and
+  there is no other recovery layer below it; manual USB power-cycle
+  is the only recourse.  Target: cascade level 4 in PR 2.
+
+- **`gpif_soft_stop` 1 ms timing window** (issue #106).  An
+  intermittent (~10% per cycle) where the firmware's 1 ms wait after
+  `FW_TRG` deassertion is insufficient for the SM to reach IDLE,
+  causing a force-stop fallback.  Independent of the recovery
+  architecture; tracked separately.
+
+### Soak status
+
+Latest 1-hour soak on current `main`: 2099 cycles, 1 transient
+`rapid_start_stop` failure (self-recovered, 0.05% per-cycle rate),
+zero unrecoverable wedges, health checks 2099/2099.  Specific failure
+modes covered by `health.c` cascade levels will be retested after each
+level lands.
 
 ## Docker — ka9q-radio Compatibility Testing
 
