@@ -1,0 +1,66 @@
+/*
+ * health.h — recovery state machine interface
+ *
+ * Owns every recovery decision for the firmware.  All recovery-related
+ * code goes through this interface; no parallel mechanisms; no inline
+ * cleanup in handlers.
+ *
+ * Three functions form the contract:
+ *
+ *   health_record_event()  — called by code that observes a liveness
+ *                            event (EP0 callback exit, DMA progress,
+ *                            etc.).  Cheap; safe from any thread.
+ *
+ *   health_evaluate()      — called periodically from the main loop.
+ *                            Pure: examines accumulated state, returns
+ *                            health status.  Does NOT take action.
+ *
+ *   health_recover()       — called when health_evaluate() returns
+ *                            unhealthy.  Selects a remedy from the
+ *                            cascade based on the failure reason.
+ *
+ * Adding a new failure-mode detection means adding a new event type
+ * and a new evaluation branch — NOT writing a new watchdog.
+ *
+ * See PLAN_RECOVERY.md at the repo root for full design notes and the
+ * recovery cascade table.
+ */
+
+#ifndef _INCLUDED_HEALTH_H_
+#define _INCLUDED_HEALTH_H_
+
+#include "cyu3types.h"
+
+/* Liveness events recorded by callers.  Add new event types here as
+ * new failure modes are addressed.  Stub set until PR 2. */
+typedef enum {
+    HEALTH_EVENT_NONE = 0   /* placeholder; remove when first real event lands */
+} health_event_t;
+
+/* Health status returned by health_evaluate().  Add new wedged-*
+ * statuses as recovery cascade levels are implemented.  Stub set
+ * until PR 2. */
+typedef enum {
+    HEALTH_OK = 0,
+    HEALTH_WEDGED_UNKNOWN    /* placeholder for unidentified wedge */
+} health_status_t;
+
+/* One-time initialization.  Called once at firmware boot before any
+ * other health_*() function. */
+void health_init(void);
+
+/* Record a liveness event.  Safe from any thread (main, USB callback,
+ * DMA callback, timer ISR).  O(1). */
+void health_record_event(health_event_t event);
+
+/* Examine accumulated state and return current health.  Pure: no
+ * recovery action taken here.  Called periodically (~10 Hz) from the
+ * main loop. */
+health_status_t health_evaluate(void);
+
+/* Apply a remedy from the cascade based on the given status.  Called
+ * by main loop when health_evaluate() returns anything other than
+ * HEALTH_OK.  May call CyU3PDeviceReset() for catastrophic statuses. */
+void health_recover(health_status_t status);
+
+#endif /* _INCLUDED_HEALTH_H_ */

@@ -9,7 +9,7 @@ manual USB power-cycle.  Investigation showed:
 
 - The lockup is in the STOPFX3 vendor handler (EP0 thread deadlocked inside
   an SDK call).
-- The existing streaming watchdog in `RX888mk2/RunApplication.c` cannot
+- The existing streaming watchdog in `SDDC_FX3/RunApplication.c` cannot
   fire — its gating conditions are scoped to GPIF state {5,7,8,9} + DMA
   non-advance.
 - The README documents a "layered recovery architecture" that does not
@@ -28,8 +28,8 @@ from a single read.
 
 ## 2. Architectural goal
 
-Build a single recovery module — `RX888mk2/health.c` and
-`RX888mk2/health.h` — that owns every recovery decision.  The module is
+Build a single recovery module — `SDDC_FX3/health.c` and
+`SDDC_FX3/health.h` — that owns every recovery decision.  The module is
 the only place future recovery additions are made.  Existing scattered
 recovery code is left in place initially and migrated over time as
 bandwidth allows.
