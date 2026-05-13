@@ -4856,12 +4856,32 @@ static int do_test_main_recovery(libusb_device_handle *h)
     }
     printf("# HANGMAIN ACKed; waiting for HWDT to fire and re-enumerate...\n");
 
-    /* 3. Wait long enough: WD period (5 s) + one timer-pet interval
-     * before noticing (3 s worst case) + USB re-enumeration (~1-2 s).
-     * 10 s is conservative. */
-    sleep(10);
+    /* 3. Verify the device actually went away before claiming HWDT
+     * worked.  Probe TESTFX3 on the current handle a few times — once
+     * HWDT fires, libusb_control_transfer will return TIMEOUT or
+     * NO_DEVICE.  If TESTFX3 keeps succeeding past the WD period,
+     * the device never reset and Level 5 didn't fire. */
+    int saw_gone = 0;
+    for (int i = 0; i < 8 && !saw_gone; i++) {  /* up to 8 s */
+        sleep(1);
+        uint8_t probe[4];
+        int pr = ctrl_read(h, TESTFX3, 0, 0, probe, 4);
+        if (pr < 0) {
+            saw_gone = 1;
+            printf("# probe #%d: TESTFX3 -> %s (device is gone)\n",
+                   i + 1, libusb_strerror(pr));
+        }
+    }
+    if (!saw_gone) {
+        printf("FAIL test_main_recovery: device kept responding for 8 s — "
+               "HWDT did not fire.  Verify Level 5 is enabled and the "
+               "main-loop heartbeat is actually frozen by HANGMAIN.\n");
+        return 1;
+    }
 
-    /* 4. Verify device is in bootloader mode — proof that HWDT fired. */
+    /* 4. Let USB re-enumeration settle, then verify device is in
+     * bootloader mode (proof that the FX3 actually reset). */
+    sleep(2);
     libusb_device_handle *bl =
         libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
     if (!bl) {
@@ -4869,12 +4889,11 @@ static int do_test_main_recovery(libusb_device_handle *h)
             libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
         if (app) {
             libusb_close(app);
-            printf("FAIL test_main_recovery: device at APP PID, not bootloader "
-                   "— HWDT may not have fired, or firmware came back without "
-                   "a bootloader transition\n");
+            printf("FAIL test_main_recovery: device came back at APP PID "
+                   "directly — unexpected (no boot-from-EEPROM configured?)\n");
         } else {
-            printf("FAIL test_main_recovery: device not visible after 10 s; "
-                   "HWDT did not reset OR device is in deeper wedge state\n");
+            printf("FAIL test_main_recovery: device not visible at either "
+                   "PID after reset — deeper wedge state\n");
         }
         return 1;
     }
@@ -4914,19 +4933,29 @@ static int do_test_main_recovery(libusb_device_handle *h)
     }
     libusb_close(running);
 
-    if (after.boot_count == before.boot_count) {
-        printf("FAIL test_main_recovery: boot_count unchanged (%u) — "
-               "device may not have actually reset\n", after.boot_count);
-        return 1;
+    /* Reset semantics diagnostic — informational, not a fail condition.
+     * The "device gone" probe above is the actual evidence that HWDT
+     * fired.  boot_count interpretation:
+     *   == 1 (and we re-uploaded fresh firmware)  -> hard reset (RAM wiped).
+     *   == before + N                             -> warm reset (RAM
+     *                                                preserved across reset;
+     *                                                health_init re-ran).
+     *   == before, no re-upload                   -> impossible per the
+     *                                                "device gone" check
+     *                                                above; would already
+     *                                                have failed earlier. */
+    const char *reset_kind;
+    if (after.boot_count == 1) {
+        reset_kind = "hard (RAM wiped, firmware re-uploaded)";
+    } else if (after.boot_count > before.boot_count) {
+        reset_kind = "warm (RAM preserved, health_init re-ran)";
+    } else {
+        reset_kind = "unexpected";
     }
-
-    const char *reset_kind = (after.boot_count == 1) ? "hard"
-                           : (after.boot_count == before.boot_count + 1) ? "warm"
-                           : "unknown";
-    printf("PASS test_main_recovery: HANGMAIN -> HWDT reset (%s, "
-           "boot %u -> %u) -> firmware re-uploaded -> device alive "
-           "(hwconfig=0x%02X fw=%d.%d)\n",
-           reset_kind, before.boot_count, after.boot_count,
+    printf("PASS test_main_recovery: HANGMAIN -> device disappeared -> "
+           "bootloader -> firmware re-uploaded -> device alive "
+           "(boot %u -> %u, %s; hwconfig=0x%02X fw=%d.%d)\n",
+           before.boot_count, after.boot_count, reset_kind,
            buf[0], buf[1], buf[2]);
     return 0;
 }
