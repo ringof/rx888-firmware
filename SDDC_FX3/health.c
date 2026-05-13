@@ -38,11 +38,10 @@
 
 /* Bisection knob (issue: PR 3 1-hour soak introduced a streaming-dead
  * regression at ~cycle 900 that wasn't present on PR 2 firmware).
- * Set to 0 to skip CyU3PSysWatchDogConfigure() in health_init() so we
- * can isolate whether HWDT enablement is the trigger.  health_pet()
- * still calls CyU3PSysWatchDogClear() — that's a single register write
- * and is harmless when HWDT isn't enabled.  Flip back to 1 once the
- * bisection is complete. */
+ * Set to 0 to skip BOTH the CyU3PSysWatchDogConfigure() call in
+ * health_init() AND the CyU3PSysWatchDogClear() calls in health_pet()
+ * — so the WD register isn't touched at all.  Flip back to 1 once
+ * the bisection is complete. */
 #define HEALTH_HWDT_ENABLED  0
 
 /* Accumulated state inspected by health_evaluate().  Written by the
@@ -89,8 +88,12 @@ void health_pet(void)
     /* Level 5 — keep the FX3 hardware watchdog from firing.  This is
      * a single register write; cheap.  Called from every main-loop
      * iteration in RunApplication.c (both wait-for-enumeration and
-     * run-forever loops). */
+     * run-forever loops).  Gated by HEALTH_HWDT_ENABLED so the
+     * bisection probe doesn't touch the WD register at all when
+     * disabled. */
+#if HEALTH_HWDT_ENABLED
     CyU3PSysWatchDogClear();
+#endif
 }
 
 void health_record_event(health_event_t event)
