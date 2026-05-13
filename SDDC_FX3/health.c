@@ -69,17 +69,45 @@ static struct {
  * cycle).  No NVRAM persistence; cold boot resets to 0. */
 static uint32_t glBootCount = 0;
 
+/* Main-loop heartbeat — bumped by health_main_heartbeat() on every
+ * RunApplication iteration.  The WD-clear timer callback reads this
+ * to decide whether to pet HWDT.  If main hangs (e.g. via HANGMAIN),
+ * heartbeat freezes, timer stops petting, HWDT fires within
+ * HWDT_PERIOD_MS. */
+static volatile uint32_t glMainHeartbeat = 0;
+
+/* HANGMAIN test flag — set by the vendor handler in USBHandler.c,
+ * read at the top of each main-loop iteration in RunApplication.c. */
+volatile uint8_t glHealthHangMain = 0;
+
 /* ThreadX timer used to pet the HWDT.  Per KB223337 the pet must
  * happen from a timer callback context, not from the main thread. */
 #if HEALTH_HWDT_ENABLED
 static CyU3PTimer glWdClearTimer;
+static uint32_t glLastHeartbeatSeen = 0;
 
 static void health_wd_clear_cb(uint32_t param)
 {
     (void)param;
-    CyU3PSysWatchDogClear();
+    /* Only pet HWDT if the main thread has made progress since last
+     * check.  If the heartbeat is stale, deliberately skip the pet —
+     * eventually HWDT will fire and reset the device.  This is what
+     * makes Level 5 catch main-thread death. */
+    uint32_t now = glMainHeartbeat;
+    if (now != glLastHeartbeatSeen) {
+        glLastHeartbeatSeen = now;
+        CyU3PSysWatchDogClear();
+    }
 }
 #endif
+
+void health_main_heartbeat(void)
+{
+    /* Single-word increment; volatile prevents compiler reorder.
+     * Wraparound is fine — the timer callback only checks for
+     * advance-since-last-call, which is wraparound-safe. */
+    glMainHeartbeat++;
+}
 
 void health_init(void)
 {

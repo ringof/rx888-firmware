@@ -30,6 +30,14 @@ enum FX3Command {
                              * (issues #104, #105).  Safe in production: the
                              * watchdog auto-resets the device if invoked
                              * with wValue >= EP0_HANDLER_TIMEOUT_MS. */
+    HANGMAIN      = 0xCF,   /* TEST-ONLY: set glHealthHangMain so the main
+                             * thread enters an infinite spin on its next
+                             * iteration.  Heartbeat stops; the HWDT timer
+                             * callback stops petting; HWDT fires after
+                             * ~HWDT_PERIOD_MS and resets the device.
+                             * Used by tests/fx3_cmd.c test_main_recovery
+                             * to validate Level-5 end-to-end.  Safe in
+                             * production: HWDT auto-recovers. */
 };
 
 /* GPIO bit masks for GPIOFX3 control word (active-low/high depends on pin) */

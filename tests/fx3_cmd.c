@@ -59,6 +59,10 @@
 #define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
                               * used by test_health_recovery to trip the
                               * firmware health watchdog (#104, #105). */
+#define HANGMAIN      0xCF   /* TEST-ONLY: signal main thread to spin
+                              * forever on next iteration; used by
+                              * test_main_recovery to trip the FX3
+                              * hardware watchdog (Level 5). */
 
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
@@ -533,6 +537,7 @@ static int do_test_data_sanity(libusb_device_handle *h);
 static int do_test_gpif_soft_stop(libusb_device_handle *h);
 static int do_test_stop_under_backpressure(libusb_device_handle *h);
 static int do_test_health_recovery(libusb_device_handle *h);
+static int do_test_main_recovery(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -587,6 +592,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"gpif_soft_stop",   do_test_gpif_soft_stop},
     {"stop_under_backpressure", do_test_stop_under_backpressure},
     {"test_health_recovery", do_test_health_recovery},
+    {"test_main_recovery", do_test_main_recovery},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -635,6 +641,7 @@ static void print_local_help(void)
            "  gpif_soft_stop                Verify SM lands in IDLE (needs new waveform)\n"
            "  stop_under_backpressure       STOP while DMA buffers full\n"
            "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
+           "  test_main_recovery            HANGMAIN + FX3 HWDT reset round-trip (Level 5)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -4779,6 +4786,152 @@ static int do_test_health_recovery(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* test_main_recovery — end-to-end validation of health.c Level 5     */
+/*                                                                     */
+/* Issues HANGMAIN, which sets a flag in firmware causing the main    */
+/* thread to enter an infinite spin on its next iteration.  The HWDT  */
+/* clear timer callback gates the pet on a main-thread heartbeat,    */
+/* so once main spins the heartbeat freezes, pets stop, and the FX3  */
+/* hardware watchdog fires within HWDT_PERIOD_MS (5 s, KB223337).    */
+/* Device hard-resets and drops to bootloader.  Test verifies the    */
+/* round-trip, including that boot_count incremented across reset.    */
+/* ------------------------------------------------------------------ */
+static int do_test_main_recovery(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[4];
+
+    /* 1. Confirm device is healthy before the test, snapshot boot. */
+    r = ctrl_read(h, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        printf("FAIL test_main_recovery: precheck TESTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    struct fx3_stats before = {0};
+    if (read_stats(h, &before) < 0) {
+        printf("FAIL test_main_recovery: precheck GETSTATS\n");
+        return 1;
+    }
+
+    if (!g_firmware_path) {
+        printf("FAIL test_main_recovery: requires -F <firmware.img> "
+               "to re-upload after HWDT reset\n");
+        return 1;
+    }
+
+    /* Resolve firmware path before tripping the watchdog so a bad
+     * path can't leave the device stuck in bootloader. */
+    const char *fw = g_firmware_path;
+    if (access(fw, R_OK) != 0) {
+        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+        if (access(fallback, R_OK) == 0) {
+            printf("# firmware path '%s' not readable here; using fallback '%s'\n",
+                   fw, fallback);
+            fw = fallback;
+        } else {
+            printf("FAIL test_main_recovery: firmware path '%s' not readable "
+                   "(also tried '%s')\n", fw, fallback);
+            return 1;
+        }
+    }
+
+    printf("# test_main_recovery: arming HANGMAIN (boot_count=%u before)\n",
+           before.boot_count);
+    printf("#   expected: main thread spins; heartbeat freezes; FX3 HWDT fires\n"
+           "#   within ~5 s; device re-enumerates to bootloader PID 0x%04X.\n",
+           RX888_PID_BOOT);
+
+    /* 2. Issue HANGMAIN.  No data phase; expect immediate ACK because
+     * the vendor handler returns quickly — main hangs on its NEXT
+     * iteration, not inside the handler. */
+    r = libusb_control_transfer(
+        h,
+        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+        HANGMAIN, 0, 0, NULL, 0, CTRL_TIMEOUT_MS);
+
+    if (r < 0) {
+        printf("FAIL test_main_recovery: HANGMAIN: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("# HANGMAIN ACKed; waiting for HWDT to fire and re-enumerate...\n");
+
+    /* 3. Wait long enough: WD period (5 s) + one timer-pet interval
+     * before noticing (3 s worst case) + USB re-enumeration (~1-2 s).
+     * 10 s is conservative. */
+    sleep(10);
+
+    /* 4. Verify device is in bootloader mode — proof that HWDT fired. */
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (!bl) {
+        libusb_device_handle *app =
+            libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (app) {
+            libusb_close(app);
+            printf("FAIL test_main_recovery: device at APP PID, not bootloader "
+                   "— HWDT may not have fired, or firmware came back without "
+                   "a bootloader transition\n");
+        } else {
+            printf("FAIL test_main_recovery: device not visible after 10 s; "
+                   "HWDT did not reset OR device is in deeper wedge state\n");
+        }
+        return 1;
+    }
+    libusb_close(bl);
+    printf("# device at bootloader PID — FX3 HWDT fired correctly\n");
+
+    /* 5. Re-upload firmware. */
+    if (upload_firmware(g_ctx, fw) != 0) {
+        printf("FAIL test_main_recovery: firmware re-upload failed.\n"
+               "#   Device is in bootloader mode (PID 0x%04X).  Recover with:\n"
+               "#       ./fx3_cmd load <path-to-SDDC_FX3.img>\n",
+               RX888_PID_BOOT);
+        return 1;
+    }
+
+    /* 6. Verify device is back at APP PID and responding. */
+    libusb_device_handle *running =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (!running) {
+        printf("FAIL test_main_recovery: device not at APP PID after re-upload\n");
+        return 1;
+    }
+    r = ctrl_read(running, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        libusb_close(running);
+        printf("FAIL test_main_recovery: post-recovery TESTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* 7. Snapshot boot_count post-recovery and verify it changed. */
+    struct fx3_stats after = {0};
+    if (read_stats(running, &after) < 0) {
+        libusb_close(running);
+        printf("FAIL test_main_recovery: post-recovery GETSTATS\n");
+        return 1;
+    }
+    libusb_close(running);
+
+    if (after.boot_count == before.boot_count) {
+        printf("FAIL test_main_recovery: boot_count unchanged (%u) — "
+               "device may not have actually reset\n", after.boot_count);
+        return 1;
+    }
+
+    const char *reset_kind = (after.boot_count == 1) ? "hard"
+                           : (after.boot_count == before.boot_count + 1) ? "warm"
+                           : "unknown";
+    printf("PASS test_main_recovery: HANGMAIN -> HWDT reset (%s, "
+           "boot %u -> %u) -> firmware re-uploaded -> device alive "
+           "(hwconfig=0x%02X fw=%d.%d)\n",
+           reset_kind, before.boot_count, after.boot_count,
+           buf[0], buf[1], buf[2]);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -4843,6 +4996,8 @@ static void usage(const char *prog)
         "  gpif_soft_stop               Verify SM lands in IDLE (needs new waveform)\n"
         "  stop_under_backpressure      STOP while DMA buffers full\n"
         "  test_health_recovery         HANGFX3 + watchdog reset round-trip (#104, #105;\n"
+        "                                 requires -F <firmware.img> for post-reset re-upload)\n"
+        "  test_main_recovery           HANGMAIN + FX3 HWDT reset round-trip (Level 5;\n"
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
@@ -5105,6 +5260,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "test_health_recovery") == 0) {
         rc = do_test_health_recovery(h);
+
+    } else if (strcmp(cmd, "test_main_recovery") == 0) {
+        rc = do_test_main_recovery(h);
 
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);
