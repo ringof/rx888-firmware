@@ -139,8 +139,8 @@ a new evaluation branch — not writing a new watchdog.
 | 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` per `PLAN_RECOVERY.md` §5 PR N) |
 | 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
 | 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
-| 4 | `CyU3PDeviceReset(CyFalse)` | Anything else / catastrophic | full re-enumeration | **Not implemented yet** (target: PR 2, addresses #105) |
-| 5 | FX3 hardware watchdog timer (`CyU3PSysWatchDogConfigure` + periodic pet) | Levels 1–4 themselves wedged | configured period | **Not implemented yet** (target: PR 3) |
+| 4 | `CyU3PDeviceReset(CyFalse)` | Anything else / catastrophic | full re-enumeration | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` for vendor-handler hangs (#104, #105) |
+| 5 | FX3 hardware watchdog timer (`CyU3PSysWatchDogConfigure` + periodic pet) | Levels 1–4 themselves wedged (i.e. main thread itself dead) | up to 10 s | **Implemented** in `health_init()` + `health_pet()` (every 100 ms from main-loop iterations); fires only if main thread stops calling pet for >10 s |
 
 ### What's covered today
 
@@ -149,6 +149,17 @@ a new evaluation branch — not writing a new watchdog.
   >300 ms.  The existing watchdog in `SDDC_FX3/RunApplication.c`
   detects and recovers; observed reliable across `wedge_recovery`
   scenarios in `fw_test.sh` and `soak_test.sh`.
+- **EP0 vendor-handler hangs** — a vendor request callback wedged
+  inside an SDK call for >2 s.  `health_evaluate()` detects via the
+  EP0 enter/exit timestamp; `health_recover(HEALTH_WEDGED_EP0)` fires
+  `CyU3PDeviceReset(CyFalse)` (Level 4).  Validated end-to-end by the
+  `test_health_recovery` host scenario which uses the firmware-side
+  `HANGFX3` test command to trigger the failure deterministically.
+- **Catastrophic main-thread hang** — if the main thread itself stops
+  calling `health_pet()` for >10 s, the FX3 hardware watchdog fires
+  and resets the device (Level 5).  Pure defense in depth; covers any
+  failure mode in which Levels 1-4 (which depend on the main thread
+  to fire) become unreachable.
 
 ### What's not covered yet — known gaps
 

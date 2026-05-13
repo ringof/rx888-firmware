@@ -1,15 +1,20 @@
 /*
  * health.c — recovery state machine implementation
  *
- * PR 2: adds EP0 vendor-callback liveness tracking and Level 4
+ * PR 2: EP0 vendor-callback liveness tracking and Level 4
  * (CyU3PDeviceReset) backstop.  Addresses issues #104, #105.
+ *
+ * PR 3: Level 5 (FX3 hardware watchdog) catastrophic backstop.
+ * Catches the failure mode where the main thread itself stops running
+ * and Levels 1-4 (which all depend on the main thread to fire) become
+ * unreachable.  Health.c is the only place HWDT is configured/petted.
  *
  * See health.h for the contract and PLAN_RECOVERY.md for design notes.
  *
  * The discipline rule: new recovery code MUST extend one of these
- * three functions.  Do not invent parallel mechanisms.  Do not add
- * inline cleanup in handlers — record an event here and let
- * health_recover() handle it.
+ * functions.  Do not invent parallel mechanisms.  Do not add inline
+ * cleanup in handlers — record an event here and let health_recover()
+ * handle it.  Do not pet HWDT from anywhere outside health_pet().
  */
 
 #include "health.h"
@@ -24,6 +29,13 @@
  * before we hard-reset. */
 #define EP0_HANDLER_TIMEOUT_MS  2000
 
+/* FX3 hardware watchdog timer period.  The main thread pets every
+ * ~100 ms (one per ThreadSleep iteration), so 10 s is ~100x safety
+ * margin against transient processing delays.  Short enough that a
+ * true catastrophic main-thread hang gets reset within ~10 s.  Used
+ * in CyU3PSysWatchDogConfigure(); see SDK docs for hardware details. */
+#define HWDT_PERIOD_MS  10000
+
 /* Accumulated state inspected by health_evaluate().  Written by the
  * USB callback thread, read by the main loop.  Single-byte/word
  * accesses are atomic on ARM926; volatile prevents compiler reordering.
@@ -36,10 +48,23 @@ static struct {
 
 void health_init(void)
 {
-    /* PR 3 will add HWDT setup here (CyU3PSysWatchDogConfigure) as the
-     * Level 5 catastrophic-backstop. */
     glHealthState.ep0_handler_enter_ms = 0;
     glHealthState.ep0_handler_in_progress = 0;
+
+    /* Level 5 — enable the FX3 hardware watchdog.  Main loop must call
+     * health_pet() at least every HWDT_PERIOD_MS to keep the device
+     * alive; see RunApplication.c.  Requires CyU3PDeviceInit to have
+     * been called (it has, by main() in StartUp.c before us). */
+    CyU3PSysWatchDogConfigure(CyTrue, HWDT_PERIOD_MS);
+}
+
+void health_pet(void)
+{
+    /* Level 5 — keep the FX3 hardware watchdog from firing.  This is
+     * a single register write; cheap.  Called from every main-loop
+     * iteration in RunApplication.c (both wait-for-enumeration and
+     * run-forever loops). */
+    CyU3PSysWatchDogClear();
 }
 
 void health_record_event(health_event_t event)

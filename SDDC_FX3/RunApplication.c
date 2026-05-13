@@ -192,6 +192,7 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for USB CallBack Events every 100msec
 	    		CyU3PThreadSleep(100);
+				health_pet();  /* Level 5 HWDT — main thread is alive */
 				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
 						MsgParsing(glQevent);
@@ -204,6 +205,7 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for User Commands (and other CallBack Events) every 100msec
 				CyU3PThreadSleep(100);
+				health_pet();  /* Level 5 HWDT — main thread is alive */
 				nline =0;
 				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 				{

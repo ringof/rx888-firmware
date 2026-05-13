@@ -47,8 +47,16 @@ typedef enum {
 } health_status_t;
 
 /* One-time initialization.  Called once at firmware boot before any
- * other health_*() function. */
+ * other health_*() function.  Configures the FX3 hardware watchdog
+ * timer (Level 5 catastrophic backstop) — see PLAN_RECOVERY.md §4. */
 void health_init(void);
+
+/* Pet the FX3 hardware watchdog.  Must be called more frequently than
+ * the configured HWDT period (10 s) from any loop that runs while the
+ * application is supposed to be alive — i.e. both the main run-forever
+ * loop AND the wait-for-enumeration loop.  If the main thread itself
+ * stops calling this, HWDT fires and the device hard-resets. */
+void health_pet(void);
 
 /* Record a liveness event.  Safe from any thread (main, USB callback,
  * DMA callback, timer ISR).  O(1). */
