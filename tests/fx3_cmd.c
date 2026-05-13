@@ -3617,19 +3617,18 @@ static int do_test_watchdog_cap_restart(libusb_device_handle *h)
     /* Wait for watchdog to hit cap */
     sleep(5);
 
-    /* STOP then restart (clean path) */
+    /* STOP then restart (clean path).  Use the primed retry primitive
+     * (queues bulk TD before STARTFX3, recovers from xHCI EP1 error
+     * state via clear_halt) — same pattern as wedge_recovery and
+     * sustained_stream.  The unprimed bulk_read_some that lived here
+     * before races the GPIF producer at 64 MS/s and lands the host
+     * xHCI endpoint in an error state on every other run (bistable
+     * 50/50 alternation).  The firmware is innocent; the test was the
+     * outlier among streaming-recovery scenarios. */
     cmd_u32(h, STOPFX3, 0);
     usleep(200000);
 
-    r = cmd_u32(h, STARTFX3, 0);
-    if (r < 0) {
-        printf("FAIL watchdog_cap_restart: STARTFX3 #2 after cap: %s\n",
-               libusb_strerror(r));
-        set_arg(h, WDG_MAX_RECOV, 5);
-        return 1;
-    }
-
-    int got = bulk_read_some(h, 16384, 2000);
+    int got = primed_start_and_read_retry(h, 16384, 2000);
     cmd_u32(h, STOPFX3, 0);
     set_arg(h, WDG_MAX_RECOV, 5);
 
