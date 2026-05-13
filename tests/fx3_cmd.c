@@ -4309,8 +4309,14 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     uint8_t info[4] = {0};
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     if (r < 0) {
+        if (r == LIBUSB_ERROR_NO_DEVICE) {
+            /* Likely a stale handle after a recovery test or other
+             * re-enumeration event — the caller will try re-acquire
+             * and print its own diagnostic.  Stay quiet here so the
+             * common case doesn't look like a failure. */
+            return LIBUSB_ERROR_NO_DEVICE;
+        }
         printf("HEALTH FAIL: TESTFX3 failed: %s\n", libusb_strerror(r));
-        if (r == LIBUSB_ERROR_NO_DEVICE) return LIBUSB_ERROR_NO_DEVICE;
         return 1;
     }
     if (r >= 1 && info[0] != 0x04) {
@@ -4322,8 +4328,11 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     struct fx3_stats s;
     r = read_stats(h, &s);
     if (r < 0) {
+        if (r == LIBUSB_ERROR_NO_DEVICE) {
+            /* Same as above: silent, caller will handle. */
+            return LIBUSB_ERROR_NO_DEVICE;
+        }
         printf("HEALTH FAIL: GETSTATS: %s\n", libusb_strerror(r));
-        if (r == LIBUSB_ERROR_NO_DEVICE) return LIBUSB_ERROR_NO_DEVICE;
         return 1;
     }
 
