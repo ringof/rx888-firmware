@@ -4409,6 +4409,13 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         {"debug_cmd_stream",    do_test_debug_cmd_while_stream,3, 0, 0, 0},
         {"readinfodebug_flood", do_test_readinfodebug_flood,  3, 0, 0, 0},
         {"data_sanity",         do_test_data_sanity,          2, 0, 0, 0},
+        /* Recovery round-trip tests — slow (~15 s each including reset
+         * and firmware re-upload) but valuable because they exercise
+         * the actual Level 4 / Level 5 reset paths under random
+         * preceding firmware state.  Weight 3 → ~12-20 invocations
+         * per 1 hour soak (well above the 10-per-hour coverage floor). */
+        {"test_health_recovery",do_test_health_recovery,      3, 0, 0, 0},
+        {"test_main_recovery",  do_test_main_recovery,        3, 0, 0, 0},
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
