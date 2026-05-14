@@ -4523,14 +4523,43 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     int max_scenarios = 0;   /* 0 = unlimited (run until time expires) */
     int quiet = 0;           /* -q: suppress PASS output */
 
-    /* Strip -q flag from argv before positional parsing */
+    /* Per-scenario weight overrides via --weight NAME=N (or -w NAME=N).
+     * Lets the operator bias the rotation toward a specific scenario
+     * — useful for hunting context-dependent failures (e.g. a test
+     * that fails in fw_test.sh but not standalone is likely sensitive
+     * to preceding scenarios; cranking its weight surfaces it faster). */
+    struct weight_override { const char *name; int weight; };
+    struct weight_override w_overrides[32];
+    int n_w_overrides = 0;
+
+    /* Strip flags from argv before positional parsing */
     int pos_argc = 0;
     char *pos_argv[16];
     for (int i = 0; i < argc && pos_argc < 16; i++) {
-        if (strcmp(argv[i], "-q") == 0)
+        if (strcmp(argv[i], "-q") == 0) {
             quiet = 1;
-        else
+        } else if ((strcmp(argv[i], "--weight") == 0 ||
+                    strcmp(argv[i], "-w") == 0) && i + 1 < argc) {
+            const char *spec = argv[++i];
+            const char *eq = strchr(spec, '=');
+            if (!eq) {
+                fprintf(stderr, "soak: --weight expects NAME=N (got '%s')\n", spec);
+                continue;
+            }
+            if (n_w_overrides >= (int)(sizeof(w_overrides)/sizeof(w_overrides[0]))) {
+                fprintf(stderr, "soak: too many --weight overrides\n");
+                continue;
+            }
+            int wv = atoi(eq + 1);
+            if (wv < 0) wv = 0;
+            /* Stash the name pointer; comparison happens after scenarios[]
+             * is initialized.  argv stays alive for the duration. */
+            w_overrides[n_w_overrides].name = spec;       /* keep "NAME=N" — split below */
+            w_overrides[n_w_overrides].weight = wv;
+            n_w_overrides++;
+        } else {
             pos_argv[pos_argc++] = argv[i];
+        }
     }
 
     if (pos_argc >= 1) hours = atof(pos_argv[0]);
@@ -4602,10 +4631,39 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
+    /* Apply per-scenario weight overrides parsed earlier. Each spec is
+     * "NAME=N"; we already parsed N into w_overrides[].weight. Match
+     * the NAME prefix (up to '=') against scenarios[].name. */
+    for (int oi = 0; oi < n_w_overrides; oi++) {
+        const char *spec = w_overrides[oi].name;
+        const char *eq   = strchr(spec, '=');
+        size_t namelen   = eq ? (size_t)(eq - spec) : strlen(spec);
+        int matched = 0;
+        for (int si = 0; si < nscenarios; si++) {
+            if (strlen(scenarios[si].name) == namelen &&
+                strncmp(scenarios[si].name, spec, namelen) == 0) {
+                int old_w = scenarios[si].weight;
+                scenarios[si].weight = w_overrides[oi].weight;
+                printf("soak: weight override %s %d -> %d\n",
+                       scenarios[si].name, old_w, scenarios[si].weight);
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            fprintf(stderr, "soak: --weight: no scenario named '%.*s'\n",
+                    (int)namelen, spec);
+        }
+    }
+
     /* Compute total weight for weighted random selection */
     int total_weight = 0;
     for (int i = 0; i < nscenarios; i++)
         total_weight += scenarios[i].weight;
+    if (total_weight <= 0) {
+        fprintf(stderr, "soak: total weight is 0 after overrides — nothing to run\n");
+        return 2;
+    }
 
     /* Install SIGINT handler */
     soak_stop = 0;
@@ -5242,7 +5300,9 @@ static void usage(const char *prog)
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
-        "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
+        "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
+        "                               Multi-hour randomized stress test\n"
+        "                               --weight NAME=N (or -w) overrides a scenario's selection weight\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
