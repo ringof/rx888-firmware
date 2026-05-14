@@ -4493,6 +4493,19 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         {"debug_cmd_stream",    do_test_debug_cmd_while_stream,3, 0, 0, 0},
         {"readinfodebug_flood", do_test_readinfodebug_flood,  3, 0, 0, 0},
         {"data_sanity",         do_test_data_sanity,          2, 0, 0, 0},
+        /* fw_test.sh scenarios that were never added to the soak rotation.
+         * Audit traced these to a mix of historical oversight (older
+         * tests) and a stacked-PR mess that lost their wiring (the two
+         * gpif/stop tests).  All are stress-worthy and have no known
+         * isolation concerns.  Weight 3 each → ~12-15 invocations / 1h
+         * soak.  Note: gpio_extremes is *intentionally* not here —
+         * commit 1670384 documents a side-effect leak that contaminates
+         * subsequent scenarios, so it stays fw_test.sh-only. */
+        {"gpif_soft_stop",      do_test_gpif_soft_stop,       3, 0, 0, 0},
+        {"stop_under_backpressure", do_test_stop_under_backpressure, 3, 0, 0, 0},
+        {"hw_smoke",            do_test_hw_smoke,             3, 0, 0, 0},
+        {"stop_gpif_state",     do_test_stop_gpif_state,      3, 0, 0, 0},
+        {"vendor_rqt_wrap",     do_test_vendor_rqt_wrap,      3, 0, 0, 0},
         /* Recovery round-trip tests — slow (~15 s each including reset
          * and firmware re-upload) but valuable because they exercise
          * the actual Level 4 / Level 5 reset paths under random

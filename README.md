@@ -129,6 +129,13 @@ handlers.
 | `health_evaluate()` | Pure function called periodically from the main loop.  Examines accumulated state and returns a structured `health_status_t`.  Does not take action. |
 | `health_recover(status)` | Called when evaluation reports unhealthy.  Picks and applies a remedy from the cascade based on the failure reason. |
 
+Plus a fourth, narrowly-scoped function used by the FX3 hardware
+watchdog (Level 5):
+
+| Function | Role |
+|---|---|
+| `health_main_heartbeat()` | Bumped once per main-loop iteration.  The HWDT clear-timer callback (KB223337 pattern, set up in `health_init()`) only pets the watchdog when the heartbeat counter has advanced since its last check — so main-thread death is what fires Level 5, not just any failure in the timer subsystem. |
+
 Adding a new failure-mode detection means adding a new event type and
 a new evaluation branch — not writing a new watchdog.
 
@@ -139,8 +146,8 @@ a new evaluation branch — not writing a new watchdog.
 | 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` per `PLAN_RECOVERY.md` §5 PR N) |
 | 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
 | 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
-| 4 | `CyU3PDeviceReset(CyFalse)` | Anything else / catastrophic | full re-enumeration | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` for vendor-handler hangs (#104, #105) |
-| 5 | FX3 hardware watchdog timer (`CyU3PSysWatchDogConfigure` + periodic pet) | Levels 1–4 themselves wedged (i.e. main thread itself dead) | up to 10 s | **Implemented** in `health_init()` + `health_pet()` (every 100 ms from main-loop iterations); fires only if main thread stops calling pet for >10 s |
+| 4 | `CyU3PDeviceReset(CyFalse)` | Vendor-handler hang (EP0 thread deadlocked in an SDK call) | full re-enumeration (~1-2 s) | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` (#104, #105).  Validated end-to-end by `test_health_recovery` (HANGFX3). |
+| 5 | FX3 hardware watchdog timer (`CyU3PSysWatchDogConfigure`, KB223337 pattern) | Main-thread death or ThreadX scheduler/timer death — anything that prevents the heartbeat from advancing | ~5 s | **Implemented** in `health_init()` (5 s WD period) + a ThreadX timer that fires every 3 s.  The timer callback pets the WD only when `glMainHeartbeat` has advanced; a frozen heartbeat causes the WD to fire and hard-reset the device.  Validated end-to-end by `test_main_recovery` (HANGMAIN). |
 
 ### What's covered today
 
@@ -148,41 +155,63 @@ a new evaluation branch — not writing a new watchdog.
   drain, GPIF state machine in `TH0_WAIT`/`TH1_WAIT`/`TH0_RD` for
   >300 ms.  The existing watchdog in `SDDC_FX3/RunApplication.c`
   detects and recovers; observed reliable across `wedge_recovery`
-  scenarios in `fw_test.sh` and `soak_test.sh`.
+  scenarios in `fw_test.sh` and the soak rotation.
 - **EP0 vendor-handler hangs** — a vendor request callback wedged
   inside an SDK call for >2 s.  `health_evaluate()` detects via the
   EP0 enter/exit timestamp; `health_recover(HEALTH_WEDGED_EP0)` fires
-  `CyU3PDeviceReset(CyFalse)` (Level 4).  Validated end-to-end by the
-  `test_health_recovery` host scenario which uses the firmware-side
+  `CyU3PDeviceReset(CyFalse)` (Level 4).  Validated by the
+  `test_health_recovery` host scenario, which uses the firmware-side
   `HANGFX3` test command to trigger the failure deterministically.
-- **Catastrophic main-thread hang** — if the main thread itself stops
-  calling `health_pet()` for >10 s, the FX3 hardware watchdog fires
-  and resets the device (Level 5).  Pure defense in depth; covers any
-  failure mode in which Levels 1-4 (which depend on the main thread
-  to fire) become unreachable.
+- **Catastrophic main-thread death** — when the main thread stops
+  bumping `glMainHeartbeat` (deadlock, infinite loop, stack overflow,
+  ThreadX scheduler failure), the WD-clear timer callback in
+  `health.c` notices the stale counter and stops petting the FX3
+  HWDT.  The watchdog fires within ~5 s and hard-resets the device
+  (firmware re-uploaded by the host on next attach).  Validated by
+  the `test_main_recovery` host scenario, which uses the firmware-side
+  `HANGMAIN` test command to trigger the failure deterministically.
+
+### Test commands for the recovery layers
+
+| Command | Layer | What it does |
+|---|---|---|
+| `HANGFX3` (`0xCE`) | Level 4 | Test-only vendor command; sleeps `wValue` ms in the EP0 handler context.  Used by `test_health_recovery` to deterministically trip the EP0 watchdog. |
+| `HANGMAIN` (`0xCF`) | Level 5 | Test-only vendor command; sets a flag so the main thread enters an infinite spin on its next iteration.  Used by `test_main_recovery` to deterministically trip the FX3 HWDT. |
+
+Both are safe in production firmware — invoking either eventually
+self-recovers via the respective watchdog layer.
 
 ### What's not covered yet — known gaps
 
-- **EP0 / vendor-handler hangs** (issue #104, #105).  When a vendor
-  handler such as STOPFX3 hangs inside an FX3 SDK call, EP0 stops
-  responding while USB enumeration remains alive.  Today's watchdog
-  cannot fire (its gating conditions are streaming-specific) and
-  there is no other recovery layer below it; manual USB power-cycle
-  is the only recourse.  Target: cascade level 4 in PR 2.
-
 - **`gpif_soft_stop` 1 ms timing window** (issue #106).  An
-  intermittent (~10% per cycle) where the firmware's 1 ms wait after
-  `FW_TRG` deassertion is insufficient for the SM to reach IDLE,
-  causing a force-stop fallback.  Independent of the recovery
-  architecture; tracked separately.
+  intermittent (originally observed ~10% per cycle) where the
+  firmware's 1 ms wait after `FW_TRG` deassertion is insufficient
+  for the SM to reach IDLE, causing a force-stop fallback.
+  Independent of the recovery architecture; tracked separately.
+  Now in the soak rotation, so future runs will provide empirical
+  evidence on whether PR #112's scheduling changes affected the rate.
+
+- `boot_count` (GETSTATS byte [20..23]) — increments once per
+  firmware `health_init()`.  Use to detect mid-test device resets:
+  snapshot before, compare after.  Mismatch means the device reset
+  (cause indistinguishable without further state, but presence of
+  reset is unambiguous).
 
 ### Soak status
 
-Latest 1-hour soak on current `main`: 2099 cycles, 1 transient
-`rapid_start_stop` failure (self-recovered, 0.05% per-cycle rate),
-zero unrecoverable wedges, health checks 2099/2099.  Specific failure
-modes covered by `health.c` cascade levels will be retested after each
-level lands.
+Latest 2-hour soak on the PR #112 firmware (commit `0fcfae8`, seed
+26): 3368 cycles, 1 transient failure (`test_health_recovery`, #113 —
+unrelated to the recovery cascade itself; the deterministic version
+passes 100%), health checks 3368/3368 passed.  Recovery cascade
+exercised:
+
+| Level | Soak scenario | Runs | Pass | Fail |
+|---|---|---|---|---|
+| 1 | `wedge_recovery` | 211 | 211 | 0 |
+| 4 | `test_health_recovery` | 55 | 54 | 1 |
+| 5 | `test_main_recovery` | 58 | 58 | 0 |
+
+Result: 0.03% per-cycle failure rate, no unrecoverable wedges.
 
 ## Docker — ka9q-radio Compatibility Testing
 
