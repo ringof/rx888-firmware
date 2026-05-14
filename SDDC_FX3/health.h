@@ -47,8 +47,40 @@ typedef enum {
 } health_status_t;
 
 /* One-time initialization.  Called once at firmware boot before any
- * other health_*() function. */
+ * other health_*() function.  Configures the FX3 hardware watchdog
+ * timer (Level 5 catastrophic backstop) — see PLAN_RECOVERY.md §4. */
 void health_init(void);
+
+/* HWDT pet is handled internally by a ThreadX timer set up in
+ * health_init() — per Infineon KB223337 the documented pattern is a
+ * timer-callback Clear, not a main-thread call.  Callers should not
+ * pet the watchdog directly; if the main thread is alive enough to
+ * service the timer, HWDT stays satisfied.
+ *
+ * To make Level 5 catch main-thread death (not just timer/scheduler
+ * death), the main loop must call health_main_heartbeat() on every
+ * iteration.  The WD-clear timer callback only pets HWDT when this
+ * heartbeat counter has advanced since its last check.  If the main
+ * thread hangs, the heartbeat freezes, the timer stops petting, and
+ * HWDT fires within HWDT_PERIOD_MS. */
+
+/* Bumped by the main loop on every iteration (~10 Hz).  Internally
+ * compared by the WD timer callback against the previous value to
+ * decide whether to pet HWDT.  Safe to call from any thread. */
+void health_main_heartbeat(void);
+
+/* TEST-ONLY: when set non-zero (via the HANGMAIN vendor command),
+ * causes the main loop to spin forever on its next iteration.  Used
+ * by the host-side test_main_recovery scenario to validate the HWDT
+ * reset round-trip end-to-end. */
+extern volatile uint8_t glHealthHangMain;
+
+/* Read the boot counter — incremented once per firmware boot inside
+ * health_init().  Exposed via GETSTATS so the host can detect that the
+ * device reset between two snapshots, regardless of the cause (Level 4
+ * CyU3PDeviceReset, Level 5 HWDT, manual RESETFX3, power cycle).
+ * Reset to 0 by every cold boot — no NVRAM persistence. */
+uint32_t health_boot_count(void);
 
 /* Record a liveness event.  Safe from any thread (main, USB callback,
  * DMA callback, timer ISR).  O(1). */

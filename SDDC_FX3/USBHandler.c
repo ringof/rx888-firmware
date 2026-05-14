@@ -269,6 +269,10 @@ CyFxSlFifoApplnUSBSetupCB (
 						I2cTransfer(0x00, 0xC0, 1, &si_status, CyTrue); /* Si5351 reg 0 */
 						glEp0Buffer[off++] = si_status;                  /* [19] */
 					}
+					{
+						uint32_t boot_count = health_boot_count();       /* [20..23] */
+						memcpy(&glEp0Buffer[off], &boot_count, 4); off += 4;
+					}
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}
@@ -455,6 +459,22 @@ CyFxSlFifoApplnUSBSetupCB (
 						CyU3PUsbAckSetup();
 						isHandled = CyTrue;
 					}
+					break;
+
+				/* TEST-ONLY: signal the main thread to enter an infinite
+				 * spin on its next iteration.  ACK before the main thread
+				 * notices (it's currently in CyU3PThreadSleep) so the
+				 * host sees a clean reply.  Main loop checks the flag at
+				 * the top of its iteration; spin freezes the heartbeat;
+				 * the WD-clear timer callback stops petting; HWDT fires
+				 * after HWDT_PERIOD_MS and resets the device.  Used by
+				 * the host-side test_main_recovery scenario to validate
+				 * Level-5 end-to-end. */
+				case HANGMAIN:
+					DebugPrint(4, "\r\nHANGMAIN: arming main-loop hang (test-only)");
+					glHealthHangMain = 1;
+					CyU3PUsbAckSetup();
+					isHandled = CyTrue;
 					break;
 
 

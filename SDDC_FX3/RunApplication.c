@@ -117,6 +117,37 @@ void MsgParsing(uint32_t qevent)
 	}
 }
 
+/* Periodic health work — must run from every main-loop iteration in
+ * BOTH wait-for-enumeration and run-forever loops, so EP0 hangs
+ * during USB enumeration are caught too.  Bumps the main-thread
+ * heartbeat (gating the HWDT pet so Level 5 catches main-thread
+ * death) and runs the Level-4 EP0 evaluator. */
+static void health_tick(void)
+{
+	health_main_heartbeat();
+	{
+		health_status_t hs = health_evaluate();
+		if (hs != HEALTH_OK)
+		{
+			DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
+			health_recover(hs);
+		}
+	}
+}
+
+/* Check for the HANGMAIN test trigger.  If set, enter an infinite
+ * spin to simulate main-thread death — heartbeat freezes, WD timer
+ * stops petting, HWDT fires within HWDT_PERIOD_MS.  Called at the
+ * top of each main-loop iteration. */
+static void health_check_hang_request(void)
+{
+	if (glHealthHangMain)
+	{
+		DebugPrint(4, "\r\nHANGMAIN: spinning forever — HWDT should reset us");
+		while (1) { /* spin until HWDT */ }
+	}
+}
+
 void ApplicationThread ( uint32_t input)
 {
 	// input is passed to this routine from CyU3PThreadCreate, useful if the same code is used for multiple threads
@@ -192,6 +223,8 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for USB CallBack Events every 100msec
 	    		CyU3PThreadSleep(100);
+				health_check_hang_request();  /* HANGMAIN test trigger */
+				health_tick();  /* Level 4 + 5 watchdog, must run pre-enum too */
 				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 					{
 						MsgParsing(glQevent);
@@ -204,6 +237,8 @@ void ApplicationThread ( uint32_t input)
 			{
 				// Check for User Commands (and other CallBack Events) every 100msec
 				CyU3PThreadSleep(100);
+				health_check_hang_request();  /* HANGMAIN test trigger */
+				health_tick();  /* Level 4 + 5 watchdog */
 				nline =0;
 				while( CyU3PQueueReceive(&glEventAvailable, &glQevent, CYU3P_NO_WAIT)== 0)
 				{
@@ -310,20 +345,6 @@ void ApplicationThread ( uint32_t input)
 								prevDMACount, curDMA);
 						stallCount = 0;
 						prevDMACount = curDMA;
-					}
-				}
-
-				/* Health watchdog (Level 4 backstop, issues #104, #105).
-				 * Evaluated outside the glIsApplnActive check so EP0
-				 * hangs during enumeration are caught too.  On
-				 * HEALTH_WEDGED_EP0, health_recover() calls
-				 * CyU3PDeviceReset() — that does not return. */
-				{
-					health_status_t hs = health_evaluate();
-					if (hs != HEALTH_OK)
-					{
-						DebugPrint(4, "\r\nHEALTH: status=%d, recovering", hs);
-						health_recover(hs);
 					}
 				}
 

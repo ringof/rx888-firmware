@@ -1,15 +1,20 @@
 /*
  * health.c — recovery state machine implementation
  *
- * PR 2: adds EP0 vendor-callback liveness tracking and Level 4
+ * PR 2: EP0 vendor-callback liveness tracking and Level 4
  * (CyU3PDeviceReset) backstop.  Addresses issues #104, #105.
+ *
+ * PR 3: Level 5 (FX3 hardware watchdog) catastrophic backstop.
+ * Catches the failure mode where the main thread itself stops running
+ * and Levels 1-4 (which all depend on the main thread to fire) become
+ * unreachable.  Health.c is the only place HWDT is configured/petted.
  *
  * See health.h for the contract and PLAN_RECOVERY.md for design notes.
  *
  * The discipline rule: new recovery code MUST extend one of these
- * three functions.  Do not invent parallel mechanisms.  Do not add
- * inline cleanup in handlers — record an event here and let
- * health_recover() handle it.
+ * functions.  Do not invent parallel mechanisms.  Do not add inline
+ * cleanup in handlers — record an event here and let health_recover()
+ * handle it.  Do not pet HWDT from anywhere outside health_pet().
  */
 
 #include "health.h"
@@ -24,6 +29,30 @@
  * before we hard-reset. */
 #define EP0_HANDLER_TIMEOUT_MS  2000
 
+/* Phase 3 of the HWDT bisection.
+ *
+ * Phase 1 (caabaf4, both off): 1-hour soak clean.  Confirmed touching
+ *   the WD register is the trigger.
+ * Phase 2 (178f93d, Configure off / Clear from main loop): planned but
+ *   superseded — Infineon KB223337 documents a fundamentally different
+ *   pattern than what we were testing.
+ * Phase 3 (this commit): implement the KB-documented pattern verbatim.
+ *
+ * Per KB223337 the watchdog is petted by a ThreadX timer callback,
+ * NOT by the main thread.  Pet frequency is ~3 sec, WD period ~5 sec
+ * (our previous broken approach used 100 ms / 10 sec — pet was 30x
+ * more often than recommended).  The clock-domain story explains why
+ * register-write frequency might matter: with no external 32 KHz,
+ * the WD clock is derived from SYS_CLK, the same clock driving
+ * GPIF/DMA.  Per-pet contention scales with pet frequency.
+ *
+ * Set HEALTH_HWDT_ENABLED=0 to skip all WD activity (matches the
+ * Phase 1 clean baseline). */
+#define HEALTH_HWDT_ENABLED      1
+
+#define HWDT_PERIOD_MS           5000   /* Per KB223337. */
+#define HWDT_CLEAR_PERIOD_MS     3000   /* Per KB223337; must be < HWDT_PERIOD_MS. */
+
 /* Accumulated state inspected by health_evaluate().  Written by the
  * USB callback thread, read by the main loop.  Single-byte/word
  * accesses are atomic on ARM926; volatile prevents compiler reordering.
@@ -34,12 +63,80 @@ static struct {
     volatile uint8_t  ep0_handler_in_progress;
 } glHealthState = { 0, 0 };
 
+/* Boot counter — incremented once per firmware boot in health_init().
+ * Exposed via GETSTATS so the host can detect mid-test device resets
+ * (Level 4 CyU3PDeviceReset, Level 5 HWDT, manual RESETFX3, or power
+ * cycle).  No NVRAM persistence; cold boot resets to 0. */
+static uint32_t glBootCount = 0;
+
+/* Main-loop heartbeat — bumped by health_main_heartbeat() on every
+ * RunApplication iteration.  The WD-clear timer callback reads this
+ * to decide whether to pet HWDT.  If main hangs (e.g. via HANGMAIN),
+ * heartbeat freezes, timer stops petting, HWDT fires within
+ * HWDT_PERIOD_MS. */
+static volatile uint32_t glMainHeartbeat = 0;
+
+/* HANGMAIN test flag — set by the vendor handler in USBHandler.c,
+ * read at the top of each main-loop iteration in RunApplication.c. */
+volatile uint8_t glHealthHangMain = 0;
+
+/* ThreadX timer used to pet the HWDT.  Per KB223337 the pet must
+ * happen from a timer callback context, not from the main thread. */
+#if HEALTH_HWDT_ENABLED
+static CyU3PTimer glWdClearTimer;
+static uint32_t glLastHeartbeatSeen = 0;
+
+static void health_wd_clear_cb(uint32_t param)
+{
+    (void)param;
+    /* Only pet HWDT if the main thread has made progress since last
+     * check.  If the heartbeat is stale, deliberately skip the pet —
+     * eventually HWDT will fire and reset the device.  This is what
+     * makes Level 5 catch main-thread death. */
+    uint32_t now = glMainHeartbeat;
+    if (now != glLastHeartbeatSeen) {
+        glLastHeartbeatSeen = now;
+        CyU3PSysWatchDogClear();
+    }
+}
+#endif
+
+void health_main_heartbeat(void)
+{
+    /* Single-word increment; volatile prevents compiler reorder.
+     * Wraparound is fine — the timer callback only checks for
+     * advance-since-last-call, which is wraparound-safe. */
+    glMainHeartbeat++;
+}
+
 void health_init(void)
 {
-    /* PR 3 will add HWDT setup here (CyU3PSysWatchDogConfigure) as the
-     * Level 5 catastrophic-backstop. */
     glHealthState.ep0_handler_enter_ms = 0;
     glHealthState.ep0_handler_in_progress = 0;
+
+    /* Increment first thing so the count reflects "this is boot N".
+     * Exposed via health_boot_count() / GETSTATS for reset detection. */
+    glBootCount++;
+
+#if HEALTH_HWDT_ENABLED
+    /* Level 5 — enable the FX3 hardware watchdog and create a
+     * ThreadX timer to pet it.  Per Infineon KB223337 the pet must
+     * come from a timer callback (not the main thread), and at a
+     * rate well below the WD period.  Requires CyU3PDeviceInit to
+     * have already run (it has — StartUp.c invokes it before us). */
+    CyU3PSysWatchDogConfigure(CyTrue, HWDT_PERIOD_MS);
+    (void)CyU3PTimerCreate(&glWdClearTimer,
+                           health_wd_clear_cb,
+                           0,                       /* callback arg (unused) */
+                           HWDT_CLEAR_PERIOD_MS,    /* initialTicks */
+                           HWDT_CLEAR_PERIOD_MS,    /* rescheduleTicks (periodic) */
+                           CYU3P_AUTO_ACTIVATE);
+#endif
+}
+
+uint32_t health_boot_count(void)
+{
+    return glBootCount;
 }
 
 void health_record_event(health_event_t event)

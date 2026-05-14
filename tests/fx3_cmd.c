@@ -59,6 +59,10 @@
 #define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
                               * used by test_health_recovery to trip the
                               * firmware health watchdog (#104, #105). */
+#define HANGMAIN      0xCF   /* TEST-ONLY: signal main thread to spin
+                              * forever on next iteration; used by
+                              * test_main_recovery to trip the FX3
+                              * hardware watchdog (Level 5). */
 
 /* SETARGFX3 argument IDs */
 #define DAT31_ATT     10
@@ -533,6 +537,7 @@ static int do_test_data_sanity(libusb_device_handle *h);
 static int do_test_gpif_soft_stop(libusb_device_handle *h);
 static int do_test_stop_under_backpressure(libusb_device_handle *h);
 static int do_test_health_recovery(libusb_device_handle *h);
+static int do_test_main_recovery(libusb_device_handle *h);
 
 /* No-arg command table entry */
 struct local_cmd_entry {
@@ -587,6 +592,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"gpif_soft_stop",   do_test_gpif_soft_stop},
     {"stop_under_backpressure", do_test_stop_under_backpressure},
     {"test_health_recovery", do_test_health_recovery},
+    {"test_main_recovery", do_test_main_recovery},
     {"reset",            do_reset},
     {NULL, NULL}
 };
@@ -635,6 +641,7 @@ static void print_local_help(void)
            "  gpif_soft_stop                Verify SM lands in IDLE (needs new waveform)\n"
            "  stop_under_backpressure       STOP while DMA buffers full\n"
            "  test_health_recovery          HANGFX3 + watchdog reset round-trip (#104, #105)\n"
+           "  test_main_recovery            HANGMAIN + FX3 HWDT reset round-trip (Level 5)\n"
            "  pib_overflow                  Provoke + detect PIB error\n"
            "  stack_check                   Query stack watermark\n"
            "  i2cr <addr> <reg> <len>       I2C read (hex)\n"
@@ -1318,7 +1325,9 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
  */
-#define GETSTATS_LEN  20
+#define GETSTATS_LEN  24    /* bumped from 20 in PR 3 — adds boot_count [20..23].
+                             * Strict-length check below means flashing the new
+                             * firmware is required after this host update. */
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1328,6 +1337,10 @@ struct fx3_stats {
     uint32_t i2c_failures;
     uint32_t streaming_faults;
     uint8_t  si5351_status;
+    uint32_t boot_count;       /* Increments once per firmware boot.  Mismatch
+                                * across two snapshots = device reset between
+                                * them (HWDT, CyU3PDeviceReset, RESETFX3, or
+                                * power cycle). */
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1343,6 +1356,7 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->i2c_failures, &buf[11], 4);
     memcpy(&s->streaming_faults, &buf[15], 4);
     s->si5351_status = buf[19];
+    memcpy(&s->boot_count, &buf[20], 4);
     return 0;
 }
 
@@ -1355,10 +1369,10 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status);
+           s.si5351_status, s.boot_count);
     return 0;
 }
 
@@ -4282,13 +4296,26 @@ struct soak_scenario {
 /* Run between every soak scenario.  Probes TESTFX3 (device alive,
  * hwconfig unchanged) and GETSTATS (GPIF state sane), storing the
  * latest stats snapshot in *prev for the status-line report.
- * Returns 0 on pass, 1 on fail. */
+ * Returns:
+ *   0                            on pass
+ *   LIBUSB_ERROR_NO_DEVICE       on definitive disconnect — caller
+ *                                must abort the soak; further calls
+ *                                will only cascade.
+ *   1                            on other (potentially transient)
+ *                                failure — caller may retry. */
 static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
 {
     /* TESTFX3 — device alive, hwconfig still 0x04 */
     uint8_t info[4] = {0};
     int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
     if (r < 0) {
+        if (r == LIBUSB_ERROR_NO_DEVICE) {
+            /* Likely a stale handle after a recovery test or other
+             * re-enumeration event — the caller will try re-acquire
+             * and print its own diagnostic.  Stay quiet here so the
+             * common case doesn't look like a failure. */
+            return LIBUSB_ERROR_NO_DEVICE;
+        }
         printf("HEALTH FAIL: TESTFX3 failed: %s\n", libusb_strerror(r));
         return 1;
     }
@@ -4301,6 +4328,10 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     struct fx3_stats s;
     r = read_stats(h, &s);
     if (r < 0) {
+        if (r == LIBUSB_ERROR_NO_DEVICE) {
+            /* Same as above: silent, caller will handle. */
+            return LIBUSB_ERROR_NO_DEVICE;
+        }
         printf("HEALTH FAIL: GETSTATS: %s\n", libusb_strerror(r));
         return 1;
     }
@@ -4315,6 +4346,74 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
     return 0;
 }
 
+/* When the soak's health check returns LIBUSB_ERROR_NO_DEVICE, the
+ * handle may be stale — the device reset and re-enumerated as the
+ * same APP PID 0x00F1 but a different USB bus address, invalidating
+ * the prior libusb handle.  This is the expected outcome of
+ * test_health_recovery / test_main_recovery succeeding (and of
+ * RESETFX3, and of HWDT firing in field conditions).
+ *
+ * Try to re-acquire: close the stale handle, look for the device at
+ * APP PID, replace *h_inout if found, and report 0.  If not at APP
+ * PID, the device may be in bootloader; try to re-upload firmware
+ * via the existing helper.  Return -1 only if the device is truly
+ * inaccessible (no APP PID, no bootloader PID, or upload fails). */
+static int soak_try_reacquire(libusb_device_handle **h_inout)
+{
+    if (*h_inout) {
+        libusb_close(*h_inout);
+        *h_inout = NULL;
+    }
+
+    /* Brief settle — re-enumeration takes a moment. */
+    usleep(500000);
+
+    libusb_device_handle *fresh =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (fresh) {
+        /* Stale handle replaced; device is alive at APP PID. */
+        printf("# soak: re-acquired handle at APP PID 0x%04X\n",
+               RX888_PID_APP);
+        *h_inout = fresh;
+        return 0;
+    }
+
+    /* Not at APP PID — check bootloader.  This happens when the
+     * device just reset (e.g. HWDT fired) and no host-side test
+     * re-uploaded firmware.  If we have g_firmware_path or a
+     * fallback, re-upload and re-acquire. */
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (bl) {
+        libusb_close(bl);
+        const char *fw = g_firmware_path;
+        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+        if (!fw || access(fw, R_OK) != 0) {
+            if (access(fallback, R_OK) == 0) fw = fallback;
+        }
+        if (!fw) {
+            printf("# soak: device at bootloader PID but no firmware "
+                   "available to re-upload (use -F or place the image "
+                   "at ../SDDC_FX3/SDDC_FX3.img)\n");
+            return -1;
+        }
+        if (upload_firmware(g_ctx, fw) != 0) {
+            printf("# soak: device at bootloader PID; re-upload failed\n");
+            return -1;
+        }
+        fresh = libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (!fresh) {
+            printf("# soak: device not at APP PID after re-upload\n");
+            return -1;
+        }
+        printf("# soak: re-uploaded firmware and re-acquired handle\n");
+        *h_inout = fresh;
+        return 0;
+    }
+
+    return -1;  /* device not at either PID — truly gone */
+}
+
 /* Soak test outer loop.
  *
  * Parses optional [hours] [seed] from argv, installs a SIGINT handler
@@ -4324,9 +4423,16 @@ static int soak_health_check(libusb_device_handle *h, struct fx3_stats *prev)
  *   3. Health check (TESTFX3 + GETSTATS)
  *   4. Update per-scenario and cumulative stats
  *   5. Print status line every 10 cycles
- * Prints a final summary table on exit.  Returns 0 if all passed. */
-static int soak_main(libusb_device_handle *h, int argc, char **argv)
+ * Prints a final summary table on exit.  Returns 0 if all passed.
+ *
+ * Takes a pointer-to-pointer for the device handle so that handle
+ * replacements from soak_try_reacquire() (which closes the stale
+ * handle and opens a fresh one) propagate back to main()'s cleanup
+ * path.  Without this, main()'s close_rx888(h) would operate on a
+ * stale (already-closed) pointer after any re-acquire. */
+static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
 {
+    libusb_device_handle *h = *h_inout;
     double hours = 1.0;
     unsigned int seed = (unsigned int)time(NULL);
     int max_scenarios = 0;   /* 0 = unlimited (run until time expires) */
@@ -4387,6 +4493,13 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         {"debug_cmd_stream",    do_test_debug_cmd_while_stream,3, 0, 0, 0},
         {"readinfodebug_flood", do_test_readinfodebug_flood,  3, 0, 0, 0},
         {"data_sanity",         do_test_data_sanity,          2, 0, 0, 0},
+        /* Recovery round-trip tests — slow (~15 s each including reset
+         * and firmware re-upload) but valuable because they exercise
+         * the actual Level 4 / Level 5 reset paths under random
+         * preceding firmware state.  Weight 3 → ~12-20 invocations
+         * per 1 hour soak (well above the 10-per-hour coverage floor). */
+        {"test_health_recovery",do_test_health_recovery,      3, 0, 0, 0},
+        {"test_main_recovery",  do_test_main_recovery,        3, 0, 0, 0},
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
@@ -4421,6 +4534,7 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
     memset(&prev_stats, 0, sizeof(prev_stats));
     if (soak_health_check(h, &prev_stats) != 0) {
         printf("SOAK ABORT: initial health check failed\n");
+        *h_inout = h;  /* propagate (no re-acquire happened, but keep callers honest) */
         return 1;
     }
 
@@ -4529,15 +4643,59 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         /* Health check — retry once on failure.  After a scenario
          * triggers a watchdog recovery, the device may need up to ~2s
          * to finish.  Rather than penalise the next scenario with a
-         * broken device, absorb the delay here. */
-        if (soak_health_check(h, &prev_stats) == 0) {
+         * broken device, absorb the delay here.
+         *
+         * Special-case LIBUSB_ERROR_NO_DEVICE: the device handle is
+         * definitively invalid (physical disconnect, unrecoverable
+         * firmware wedge, or HWDT/Level-4 reset without a host-side
+         * re-upload).  Further scenarios will only cascade NO_DEVICE
+         * failures; abort the soak with the summary so far. */
+        int hc = soak_health_check(h, &prev_stats);
+        if (hc == 0) {
             health_pass++;
+        } else if (hc == LIBUSB_ERROR_NO_DEVICE) {
+            /* Stale handle — common after recovery tests, RESETFX3, or
+             * any scenario that causes the device to re-enumerate.
+             * Try to re-acquire before declaring the device gone. */
+            printf("# soak: NO_DEVICE after '%s'; attempting to re-acquire...\n",
+                   scenarios[sel].name);
+            if (soak_try_reacquire(&h) == 0 &&
+                soak_health_check(h, &prev_stats) == 0) {
+                health_pass++;
+            } else {
+                printf("\nSOAK ABORT: device gone after '%s' and re-acquire "
+                       "failed.\n"
+                       "  Likely cause: physical disconnect, unrecoverable "
+                       "wedge, or firmware reset with no usable firmware\n"
+                       "  image to re-upload (use -F <firmware.img> or put "
+                       "the image at ../SDDC_FX3/SDDC_FX3.img).\n"
+                       "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+                       scenarios[sel].name);
+                health_fail++;
+                soak_stop = 1;
+                break;
+            }
         } else {
             /* Device unhealthy — give the watchdog time to finish,
              * then retry once before moving on. */
             usleep(2000000);       /* 2 s recovery window */
-            if (soak_health_check(h, &prev_stats) == 0) {
+            int hc2 = soak_health_check(h, &prev_stats);
+            if (hc2 == 0) {
                 health_pass++;
+            } else if (hc2 == LIBUSB_ERROR_NO_DEVICE) {
+                printf("# soak: NO_DEVICE after retry; attempting to re-acquire...\n");
+                if (soak_try_reacquire(&h) == 0 &&
+                    soak_health_check(h, &prev_stats) == 0) {
+                    health_pass++;
+                } else {
+                    printf("\nSOAK ABORT: device gone after retry and re-acquire "
+                           "failed.\n  Last scenario: %s\n"
+                           "  Recover with:  ./fx3_cmd load <firmware.img>\n",
+                           scenarios[sel].name);
+                    health_fail++;
+                    soak_stop = 1;
+                    break;
+                }
             } else {
                 health_fail++;
             }
@@ -4599,6 +4757,11 @@ static int soak_main(libusb_device_handle *h, int argc, char **argv)
         printf("\nResult: ALL PASSED (%d cycles)\n", total_cycles);
     }
 
+    /* Propagate any re-acquired handle back to the caller's local
+     * so main()'s out: cleanup operates on the live pointer, not a
+     * stale one closed by soak_try_reacquire().  See PR #112 review
+     * thread r3236353947. */
+    *h_inout = h;
     return total_fail > 0 ? 1 : 0;
 }
 
@@ -4629,28 +4792,26 @@ static int do_test_health_recovery(libusb_device_handle *h)
         return 1;
     }
 
-    if (!g_firmware_path) {
-        printf("FAIL test_health_recovery: requires -F <firmware.img> "
-               "to re-upload after watchdog reset\n");
-        return 1;
-    }
-
-    /* Resolve firmware path early so a missing/bad path fails BEFORE we
-     * trip the watchdog and leave the device in bootloader.  Try the
-     * given path first; fall back to a conventional relative location
-     * when invoked from tests/ (where ../SDDC_FX3/SDDC_FX3.img is the
-     * usual layout). */
+    /* Resolve firmware path BEFORE tripping the watchdog so a missing
+     * or unspecified path fails cleanly without stranding the device
+     * in bootloader.  Try -F if given; otherwise fall back to the
+     * conventional ../SDDC_FX3/SDDC_FX3.img path when invoked from
+     * tests/.  This lets `./fx3_cmd soak ...` work without an explicit
+     * -F so long as the firmware build is in its usual location. */
     const char *fw = g_firmware_path;
-    if (access(fw, R_OK) != 0) {
-        const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0) {
         if (access(fallback, R_OK) == 0) {
-            printf("# firmware path '%s' not readable here; using fallback '%s'\n",
-                   fw, fallback);
+            if (fw) {
+                printf("# firmware path '%s' not readable; using fallback '%s'\n",
+                       fw, fallback);
+            }
             fw = fallback;
         } else {
-            printf("FAIL test_health_recovery: firmware path '%s' not readable "
-                   "(also tried '%s').  Use -F <firmware.img> with a path that "
-                   "resolves from your current working directory.\n", fw, fallback);
+            printf("FAIL test_health_recovery: no readable firmware "
+                   "(tried '%s' and '%s').  Use -F <firmware.img> with a "
+                   "path that resolves from your current working directory.\n",
+                   fw ? fw : "(none)", fallback);
             return 1;
         }
     }
@@ -4737,6 +4898,181 @@ static int do_test_health_recovery(libusb_device_handle *h)
 }
 
 /* ------------------------------------------------------------------ */
+/* test_main_recovery — end-to-end validation of health.c Level 5     */
+/*                                                                     */
+/* Issues HANGMAIN, which sets a flag in firmware causing the main    */
+/* thread to enter an infinite spin on its next iteration.  The HWDT  */
+/* clear timer callback gates the pet on a main-thread heartbeat,    */
+/* so once main spins the heartbeat freezes, pets stop, and the FX3  */
+/* hardware watchdog fires within HWDT_PERIOD_MS (5 s, KB223337).    */
+/* Device hard-resets and drops to bootloader.  Test verifies the    */
+/* round-trip, including that boot_count incremented across reset.    */
+/* ------------------------------------------------------------------ */
+static int do_test_main_recovery(libusb_device_handle *h)
+{
+    int r;
+    uint8_t buf[4];
+
+    /* 1. Confirm device is healthy before the test, snapshot boot. */
+    r = ctrl_read(h, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        printf("FAIL test_main_recovery: precheck TESTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    struct fx3_stats before = {0};
+    if (read_stats(h, &before) < 0) {
+        printf("FAIL test_main_recovery: precheck GETSTATS\n");
+        return 1;
+    }
+
+    /* Resolve firmware path BEFORE tripping the watchdog so a missing
+     * or unspecified path fails cleanly without stranding the device
+     * in bootloader.  Same shape as test_health_recovery — see that
+     * function for the rationale. */
+    const char *fw = g_firmware_path;
+    const char *fallback = "../SDDC_FX3/SDDC_FX3.img";
+    if (!fw || access(fw, R_OK) != 0) {
+        if (access(fallback, R_OK) == 0) {
+            if (fw) {
+                printf("# firmware path '%s' not readable; using fallback '%s'\n",
+                       fw, fallback);
+            }
+            fw = fallback;
+        } else {
+            printf("FAIL test_main_recovery: no readable firmware "
+                   "(tried '%s' and '%s').  Use -F <firmware.img> with a "
+                   "path that resolves from your current working directory.\n",
+                   fw ? fw : "(none)", fallback);
+            return 1;
+        }
+    }
+
+    printf("# test_main_recovery: arming HANGMAIN (boot_count=%u before)\n",
+           before.boot_count);
+    printf("#   expected: main thread spins; heartbeat freezes; FX3 HWDT fires\n"
+           "#   within ~5 s; device re-enumerates to bootloader PID 0x%04X.\n",
+           RX888_PID_BOOT);
+
+    /* 2. Issue HANGMAIN.  No data phase; expect immediate ACK because
+     * the vendor handler returns quickly — main hangs on its NEXT
+     * iteration, not inside the handler. */
+    r = libusb_control_transfer(
+        h,
+        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE,
+        HANGMAIN, 0, 0, NULL, 0, CTRL_TIMEOUT_MS);
+
+    if (r < 0) {
+        printf("FAIL test_main_recovery: HANGMAIN: %s\n", libusb_strerror(r));
+        return 1;
+    }
+    printf("# HANGMAIN ACKed; waiting for HWDT to fire and re-enumerate...\n");
+
+    /* 3. Verify the device actually went away before claiming HWDT
+     * worked.  Probe TESTFX3 on the current handle a few times — once
+     * HWDT fires, libusb_control_transfer will return TIMEOUT or
+     * NO_DEVICE.  If TESTFX3 keeps succeeding past the WD period,
+     * the device never reset and Level 5 didn't fire. */
+    int saw_gone = 0;
+    for (int i = 0; i < 8 && !saw_gone; i++) {  /* up to 8 s */
+        sleep(1);
+        uint8_t probe[4];
+        int pr = ctrl_read(h, TESTFX3, 0, 0, probe, 4);
+        if (pr < 0) {
+            saw_gone = 1;
+            printf("# probe #%d: TESTFX3 -> %s (device is gone)\n",
+                   i + 1, libusb_strerror(pr));
+        }
+    }
+    if (!saw_gone) {
+        printf("FAIL test_main_recovery: device kept responding for 8 s — "
+               "HWDT did not fire.  Verify Level 5 is enabled and the "
+               "main-loop heartbeat is actually frozen by HANGMAIN.\n");
+        return 1;
+    }
+
+    /* 4. Let USB re-enumeration settle, then verify device is in
+     * bootloader mode (proof that the FX3 actually reset). */
+    sleep(2);
+    libusb_device_handle *bl =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_BOOT);
+    if (!bl) {
+        libusb_device_handle *app =
+            libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+        if (app) {
+            libusb_close(app);
+            printf("FAIL test_main_recovery: device came back at APP PID "
+                   "directly — unexpected (no boot-from-EEPROM configured?)\n");
+        } else {
+            printf("FAIL test_main_recovery: device not visible at either "
+                   "PID after reset — deeper wedge state\n");
+        }
+        return 1;
+    }
+    libusb_close(bl);
+    printf("# device at bootloader PID — FX3 HWDT fired correctly\n");
+
+    /* 5. Re-upload firmware. */
+    if (upload_firmware(g_ctx, fw) != 0) {
+        printf("FAIL test_main_recovery: firmware re-upload failed.\n"
+               "#   Device is in bootloader mode (PID 0x%04X).  Recover with:\n"
+               "#       ./fx3_cmd load <path-to-SDDC_FX3.img>\n",
+               RX888_PID_BOOT);
+        return 1;
+    }
+
+    /* 6. Verify device is back at APP PID and responding. */
+    libusb_device_handle *running =
+        libusb_open_device_with_vid_pid(g_ctx, RX888_VID, RX888_PID_APP);
+    if (!running) {
+        printf("FAIL test_main_recovery: device not at APP PID after re-upload\n");
+        return 1;
+    }
+    r = ctrl_read(running, TESTFX3, 0, 0, buf, 4);
+    if (r < 0) {
+        libusb_close(running);
+        printf("FAIL test_main_recovery: post-recovery TESTFX3: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+
+    /* 7. Snapshot boot_count post-recovery and verify it changed. */
+    struct fx3_stats after = {0};
+    if (read_stats(running, &after) < 0) {
+        libusb_close(running);
+        printf("FAIL test_main_recovery: post-recovery GETSTATS\n");
+        return 1;
+    }
+    libusb_close(running);
+
+    /* Reset semantics diagnostic — informational, not a fail condition.
+     * The "device gone" probe above is the actual evidence that HWDT
+     * fired.  boot_count interpretation:
+     *   == 1 (and we re-uploaded fresh firmware)  -> hard reset (RAM wiped).
+     *   == before + N                             -> warm reset (RAM
+     *                                                preserved across reset;
+     *                                                health_init re-ran).
+     *   == before, no re-upload                   -> impossible per the
+     *                                                "device gone" check
+     *                                                above; would already
+     *                                                have failed earlier. */
+    const char *reset_kind;
+    if (after.boot_count == 1) {
+        reset_kind = "hard (RAM wiped, firmware re-uploaded)";
+    } else if (after.boot_count > before.boot_count) {
+        reset_kind = "warm (RAM preserved, health_init re-ran)";
+    } else {
+        reset_kind = "unexpected";
+    }
+    printf("PASS test_main_recovery: HANGMAIN -> device disappeared -> "
+           "bootloader -> firmware re-uploaded -> device alive "
+           "(boot %u -> %u, %s; hwconfig=0x%02X fw=%d.%d)\n",
+           before.boot_count, after.boot_count, reset_kind,
+           buf[0], buf[1], buf[2]);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Usage and main                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -4801,6 +5137,8 @@ static void usage(const char *prog)
         "  gpif_soft_stop               Verify SM lands in IDLE (needs new waveform)\n"
         "  stop_under_backpressure      STOP while DMA buffers full\n"
         "  test_health_recovery         HANGFX3 + watchdog reset round-trip (#104, #105;\n"
+        "                                 requires -F <firmware.img> for post-reset re-upload)\n"
+        "  test_main_recovery           HANGMAIN + FX3 HWDT reset round-trip (Level 5;\n"
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
@@ -5064,6 +5402,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "test_health_recovery") == 0) {
         rc = do_test_health_recovery(h);
 
+    } else if (strcmp(cmd, "test_main_recovery") == 0) {
+        rc = do_test_main_recovery(h);
+
     } else if (strcmp(cmd, "vendor_rqt_wrap") == 0) {
         rc = do_test_vendor_rqt_wrap(h);
 
@@ -5121,7 +5462,10 @@ int main(int argc, char **argv)
         rc = do_test_watchdog_race(h, rnds);
 
     } else if (strcmp(cmd, "soak") == 0) {
-        rc = soak_main(h, argc - 2, argv + 2);
+        /* Pass &h so soak_try_reacquire() (which closes and replaces
+         * the handle on stale-NO_DEVICE recovery) can propagate the
+         * fresh handle back here for the out: cleanup. */
+        rc = soak_main(&h, argc - 2, argv + 2);
 
     } else if (strcmp(cmd, "reset") == 0) {
         rc = do_reset(h);
