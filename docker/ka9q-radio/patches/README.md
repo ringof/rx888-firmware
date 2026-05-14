@@ -5,12 +5,15 @@ against the pinned `KA9Q_RADIO_SHA`.  Each patch is a deliberate ask
 of the upstream maintainer; the set is kept minimal so that asks are
 focused on real, irreducible incompatibilities — not noise.
 
-| File | What | Why |
-|------|------|-----|
-| `03-startadc-before-startfx3.patch` | Insert `command_send(...,STARTADC,samprate)` before `STARTFX3` in `rx888_start_rx`. | ka9q programs the Si5351 directly via `I2CWFX3` and never sends `STARTADC`.  SDDC firmware's `STARTFX3` runs `GpifPreflightCheck()` which requires `glAdcClockEnabled = CyTrue`, a flag only set by the `STARTADC` handler.  Without this patch, `STARTFX3` stalls EP0, the GPIF state machine never starts, and radiod times out with "No rx888 data for 5 seconds".  No workaround at the host or container level. |
+Currently no `*.patch` files are active.  The Dockerfile's
+`COPY patches/*.patch` step is guarded against an empty match so the
+build succeeds with zero patches applied.
 
-When upstream ka9q-radio merges this fix, bump `KA9Q_RADIO_SHA` in
-the Dockerfile and remove this patch.
+## Disabled / historical
+
+| File | What it was | Why it's disabled |
+|------|-------------|-------------------|
+| `03-startadc-before-startfx3.patch.disabled` | Inserted `command_send(...,STARTADC,samprate)` before `STARTFX3` in `rx888_start_rx` to wake the firmware's `glAdcClockEnabled` host-cache flag. | Superseded by SDDC_FX3 commit `f3835a5` on branch `claude/si5351-chip-query`: `si5351_clk0_enabled()` now reads CLK0_CONTROL reg 16 bit 7 from the Si5351 directly, so `GpifPreflightCheck()` sees the chip's real state when ka9q programs Si5351 via `I2CWFX3`.  No host-side workaround needed.  File kept in-tree with `.disabled` suffix (skipped by the `*.patch` glob) for archaeology. |
 
 ## Findings that did *not* become patches
 

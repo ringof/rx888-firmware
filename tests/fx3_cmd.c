@@ -509,6 +509,7 @@ static int do_test_stats_pll(libusb_device_handle *h);
 static int do_test_stop_gpif_state(libusb_device_handle *h);
 static int do_test_stop_start_cycle(libusb_device_handle *h);
 static int do_test_pll_preflight(libusb_device_handle *h);
+static int do_test_clk0_chip_query(libusb_device_handle *h);
 static int do_test_wedge_recovery(libusb_device_handle *h);
 static int do_test_clock_pull(libusb_device_handle *h);
 static int do_test_freq_hop(libusb_device_handle *h);
@@ -564,6 +565,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"stop_gpif_state",  do_test_stop_gpif_state},
     {"stop_start_cycle", do_test_stop_start_cycle},
     {"pll_preflight",    do_test_pll_preflight},
+    {"clk0_chip_query",  do_test_clk0_chip_query},
     {"wedge_recovery",   do_test_wedge_recovery},
     {"clock_pull",       do_test_clock_pull},
     {"freq_hop",         do_test_freq_hop},
@@ -613,6 +615,7 @@ static void print_local_help(void)
            "  stop_gpif_state               Verify GPIF SM stops after STOP\n"
            "  stop_start_cycle              Cycle STOP+START N times\n"
            "  pll_preflight                 Verify START rejected without clock\n"
+           "  clk0_chip_query               Verify STARTFX3 STALLs after I2CWFX3 CLK0 power-down\n"
            "  wedge_recovery                Provoke DMA wedge, test recovery\n"
            "  clock_pull                    Pull clock mid-stream, verify recovery\n"
            "  freq_hop                      Rapid ADC frequency hopping\n"
@@ -1325,9 +1328,11 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
  */
-#define GETSTATS_LEN  24    /* bumped from 20 in PR 3 — adds boot_count [20..23].
-                             * Strict-length check below means flashing the new
-                             * firmware is required after this host update. */
+#define GETSTATS_LEN  26    /* bumped from 24 in si5351-chip-query PR — adds
+                             * clk0_reg16 [24] and clk0_result [25] diagnostic
+                             * bytes.  Strict-length check below means flashing
+                             * the new firmware is required after this host
+                             * update. */
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1341,6 +1346,11 @@ struct fx3_stats {
                                 * across two snapshots = device reset between
                                 * them (HWDT, CyU3PDeviceReset, RESETFX3, or
                                 * power cycle). */
+    uint8_t  clk0_reg16;       /* Si5351 CLK0_CONTROL register (16) raw value.
+                                * Bit 7 = CLK0_PDN (0=on, 1=off). */
+    uint8_t  clk0_result;      /* Boolean returned by si5351_clk0_enabled():
+                                * 1 if firmware sees CLK0 as enabled (i.e.
+                                * reg16 bit 7 == 0), 0 otherwise. */
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1357,6 +1367,8 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     memcpy(&s->streaming_faults, &buf[15], 4);
     s->si5351_status = buf[19];
     memcpy(&s->boot_count, &buf[20], 4);
+    s->clk0_reg16  = buf[24];
+    s->clk0_result = buf[25];
     return 0;
 }
 
@@ -1369,10 +1381,10 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
-           s.si5351_status, s.boot_count);
+           s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result);
     return 0;
 }
 
@@ -1789,6 +1801,79 @@ static int do_test_stop_start_cycle(libusb_device_handle *h)
  *
  * NOTE: After this test the ADC clock is off.  The test restores
  * clock at the end so subsequent tests can run. */
+/* clk0_chip_query — regression test for the Si5351 chip-query change.
+ *
+ * Powers CLK0 down directly via I2CWFX3 (host-side path), asserts
+ * STARTFX3 STALLs because the firmware now reads CLK0_CONTROL reg 16
+ * bit 7 over I2C in GpifPreflightCheck instead of trusting an internal
+ * flag.  Restores CLK0 via STARTADC (firmware-side path), asserts
+ * STARTFX3 succeeds — same register read, different programming path.
+ *
+ * Pre-fix: STARTFX3 succeeded with CLK0 powered down because the
+ * firmware trusted glAdcClockEnabled, which the I2CWFX3 path never
+ * touched.  Per docs/vendor-protocol-plan.md "Commit 1" rationale. */
+static int do_test_clk0_chip_query(libusb_device_handle *h)
+{
+    int r;
+    uint8_t pdn = 0x80;  /* CLK0_PDN=1 — power-down command for reg 16 */
+
+    /* 1. Power CLK0 down directly via I2CWFX3 reg 16.  Si5351 addr 0xC0.
+     *    Bypasses STARTADC, so glAdcClockEnabled would NOT be cleared
+     *    on pre-fix firmware. */
+    r = ctrl_write_buf(h, I2CWFX3, 0xC0, 16, &pdn, 1);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: I2CWFX3 power-down: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    usleep(50000);
+
+    /* 2. STARTFX3 should be rejected — preflight reads reg 16 over I2C
+     *    and sees bit 7 set. */
+    r = cmd_u32(h, STARTFX3, 0);
+    int rejected = (r == LIBUSB_ERROR_PIPE);
+    if (r == 0) {
+        /* Some preflight paths silently fail-and-no-data.  Confirm by
+         * trying to read bulk; no data means quietly rejected. */
+        int got = bulk_read_some(h, 4096, 1000);
+        cmd_u32(h, STOPFX3, 0);
+        if (got <= 0) rejected = 1;
+    }
+    if (!rejected) {
+        /* Restore baseline before reporting. */
+        cmd_u32(h, STARTADC, 32000000);
+        printf("FAIL clk0_chip_query: STARTFX3 accepted with CLK0 powered "
+               "down via I2CWFX3 (chip-query missing or stale flag still "
+               "in use)\n");
+        return 1;
+    }
+
+    /* 3. Restore CLK0 via STARTADC.  Firmware re-programs Si5351 and
+     *    clears CLK0_PDN.  Chip-query should now see CLK0 enabled. */
+    r = cmd_u32(h, STARTADC, 32000000);
+    if (r < 0) {
+        printf("FAIL clk0_chip_query: STARTADC restore: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    usleep(50000);
+
+    /* 4. STARTFX3 should now succeed.  Use primed_start_and_read_retry
+     *    for the verify so we don't lose the DMA-fill race. */
+    int got = primed_start_and_read_retry(h, 16384, 2000);
+    cmd_u32(h, STOPFX3, 0);
+    if (got < 1024) {
+        printf("FAIL clk0_chip_query: only %d bytes after CLK0 restore "
+               "(expected >= 1024)\n", got < 0 ? 0 : got);
+        return 1;
+    }
+
+    printf("PASS clk0_chip_query: STARTFX3 STALLs after I2CWFX3 "
+           "power-down and resumes after STARTADC restore (%d bytes flowed)\n",
+           got);
+    return 0;
+}
+
 static int do_test_pll_preflight(libusb_device_handle *h)
 {
     int r;
@@ -4438,14 +4523,43 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     int max_scenarios = 0;   /* 0 = unlimited (run until time expires) */
     int quiet = 0;           /* -q: suppress PASS output */
 
-    /* Strip -q flag from argv before positional parsing */
+    /* Per-scenario weight overrides via --weight NAME=N (or -w NAME=N).
+     * Lets the operator bias the rotation toward a specific scenario
+     * — useful for hunting context-dependent failures (e.g. a test
+     * that fails in fw_test.sh but not standalone is likely sensitive
+     * to preceding scenarios; cranking its weight surfaces it faster). */
+    struct weight_override { const char *name; int weight; };
+    struct weight_override w_overrides[32];
+    int n_w_overrides = 0;
+
+    /* Strip flags from argv before positional parsing */
     int pos_argc = 0;
     char *pos_argv[16];
     for (int i = 0; i < argc && pos_argc < 16; i++) {
-        if (strcmp(argv[i], "-q") == 0)
+        if (strcmp(argv[i], "-q") == 0) {
             quiet = 1;
-        else
+        } else if ((strcmp(argv[i], "--weight") == 0 ||
+                    strcmp(argv[i], "-w") == 0) && i + 1 < argc) {
+            const char *spec = argv[++i];
+            const char *eq = strchr(spec, '=');
+            if (!eq) {
+                fprintf(stderr, "soak: --weight expects NAME=N (got '%s')\n", spec);
+                continue;
+            }
+            if (n_w_overrides >= (int)(sizeof(w_overrides)/sizeof(w_overrides[0]))) {
+                fprintf(stderr, "soak: too many --weight overrides\n");
+                continue;
+            }
+            int wv = atoi(eq + 1);
+            if (wv < 0) wv = 0;
+            /* Stash the name pointer; comparison happens after scenarios[]
+             * is initialized.  argv stays alive for the duration. */
+            w_overrides[n_w_overrides].name = spec;       /* keep "NAME=N" — split below */
+            w_overrides[n_w_overrides].weight = wv;
+            n_w_overrides++;
+        } else {
             pos_argv[pos_argc++] = argv[i];
+        }
     }
 
     if (pos_argc >= 1) hours = atof(pos_argv[0]);
@@ -4463,6 +4577,7 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         {"oob_brequest",        do_test_oob_brequest,         5, 0, 0, 0},
         {"oob_setarg",          do_test_oob_setarg,           5, 0, 0, 0},
         {"pll_preflight",       do_test_pll_preflight,       10, 0, 0, 0},
+        {"clk0_chip_query",     do_test_clk0_chip_query,     10, 0, 0, 0},
         {"clock_pull",          do_test_clock_pull,          10, 0, 0, 0},
         {"freq_hop",            do_test_freq_hop,            10, 0, 0, 0},
         {"ep0_stall_recovery",  do_test_ep0_stall_recovery,   5, 0, 0, 0},
@@ -4516,10 +4631,39 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
     };
     int nscenarios = (int)(sizeof(scenarios) / sizeof(scenarios[0]));
 
+    /* Apply per-scenario weight overrides parsed earlier. Each spec is
+     * "NAME=N"; we already parsed N into w_overrides[].weight. Match
+     * the NAME prefix (up to '=') against scenarios[].name. */
+    for (int oi = 0; oi < n_w_overrides; oi++) {
+        const char *spec = w_overrides[oi].name;
+        const char *eq   = strchr(spec, '=');
+        size_t namelen   = eq ? (size_t)(eq - spec) : strlen(spec);
+        int matched = 0;
+        for (int si = 0; si < nscenarios; si++) {
+            if (strlen(scenarios[si].name) == namelen &&
+                strncmp(scenarios[si].name, spec, namelen) == 0) {
+                int old_w = scenarios[si].weight;
+                scenarios[si].weight = w_overrides[oi].weight;
+                printf("soak: weight override %s %d -> %d\n",
+                       scenarios[si].name, old_w, scenarios[si].weight);
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            fprintf(stderr, "soak: --weight: no scenario named '%.*s'\n",
+                    (int)namelen, spec);
+        }
+    }
+
     /* Compute total weight for weighted random selection */
     int total_weight = 0;
     for (int i = 0; i < nscenarios; i++)
         total_weight += scenarios[i].weight;
+    if (total_weight <= 0) {
+        fprintf(stderr, "soak: total weight is 0 after overrides — nothing to run\n");
+        return 2;
+    }
 
     /* Install SIGINT handler */
     soak_stop = 0;
@@ -5128,6 +5272,7 @@ static void usage(const char *prog)
         "  stop_gpif_state              Verify GPIF SM stops after STOPFX3\n"
         "  stop_start_cycle             Cycle STOP+START N times, verify data\n"
         "  pll_preflight                Verify STARTFX3 rejected without clock\n"
+        "  clk0_chip_query              Verify STARTFX3 STALLs after I2CWFX3 CLK0 power-down\n"
         "  wedge_recovery               Provoke DMA wedge, test STOP+START recovery\n"
         "  clock_pull                   Pull clock mid-stream, verify recovery\n"
         "  freq_hop                     Rapid ADC frequency hopping\n"
@@ -5155,7 +5300,9 @@ static void usage(const char *prog)
         "                                 requires -F <firmware.img> for post-reset re-upload)\n"
         "  watchdog_stress [secs]       Observe WDG recovery self-limiting\n"
         "  watchdog_race [rounds]       Provoke EP0-vs-WDG thread race\n"
-        "  soak [hours] [seed] [max]    Multi-hour randomized stress test\n"
+        "  soak [hours] [seed] [max] [-q] [--weight NAME=N]...\n"
+        "                               Multi-hour randomized stress test\n"
+        "                               --weight NAME=N (or -w) overrides a scenario's selection weight\n"
         "\n"
         "Output:  PASS/FAIL <command> [details]\n"
         "Exit:    0 on PASS, 1 on FAIL\n",
@@ -5345,6 +5492,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stop_start_cycle") == 0) {
         rc = do_test_stop_start_cycle(h);
+
+    } else if (strcmp(cmd, "clk0_chip_query") == 0) {
+        rc = do_test_clk0_chip_query(h);
 
     } else if (strcmp(cmd, "pll_preflight") == 0) {
         rc = do_test_pll_preflight(h);

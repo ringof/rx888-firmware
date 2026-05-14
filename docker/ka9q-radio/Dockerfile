@@ -42,11 +42,18 @@ WORKDIR /build/ka9q-radio
 
 # Apply local compatibility patches against the pinned SHA.
 # See docker/ka9q-radio/patches/README.md and docs/ka9q-compat-audit.md.
-COPY patches/*.patch /tmp/patches/
-RUN for p in /tmp/patches/*.patch; do \
+# COPY the whole patches/ tree (not just *.patch) so the build succeeds
+# even when zero active patches exist — disabled/historical patches kept
+# in-tree under *.patch.disabled are intentionally skipped by the glob.
+COPY patches/ /tmp/patches/
+RUN applied=0; \
+    for p in /tmp/patches/*.patch; do \
+        [ -e "$p" ] || break; \
         echo "Applying $p"; \
         git apply --whitespace=nowarn "$p"; \
-    done
+        applied=$((applied+1)); \
+    done; \
+    echo "ka9q-radio patches applied: $applied"
 
 # Build only what we need: radiod core + rx888.so plugin + control utility
 # Disable all other SDR hardware to avoid pulling in unnecessary -dev packages

@@ -1,3 +1,19 @@
+DISABLED — superseded by SDDC_FX3 firmware fix (commit f3835a5 on
+branch claude/si5351-chip-query).  Kept in-tree for archaeology.
+
+The firmware now answers `si5351_clk0_enabled()` by reading the Si5351
+CLK0_CONTROL register (reg 16, bit 7) over I2C instead of returning a
+stale `glAdcClockEnabled` host-cache flag.  When ka9q-radio programs
+the Si5351 directly via `I2CWFX3`, `GpifPreflightCheck()` inside
+STARTFX3 now correctly sees CLK0 enabled and passes preflight, so the
+host no longer needs to send a redundant STARTADC.
+
+This file is intentionally renamed with a `.disabled` suffix so the
+Dockerfile patch glob (`*.patch`) skips it.  Do not re-enable without
+also reverting commit f3835a5 in firmware.
+
+Original patch follows for reference:
+
 From: SDDC_FX3 maintainers
 Subject: [PATCH] rx888: send STARTADC before STARTFX3 for SDDC firmware compatibility
 

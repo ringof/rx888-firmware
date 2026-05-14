@@ -235,8 +235,9 @@ CyFxSlFifoApplnUSBSetupCB (
 							 * We use si5351_pll_locked() rather than
 							 * GpifPreflightCheck() because we just called
 							 * si5351aSetFrequencyA(freq) with freq > 0, so
-							 * glAdcClockEnabled is already CyTrue — the
-							 * extra clk0_enabled check would be redundant. */
+							 * the chip's CLK0_CONTROL bit 7 is already
+							 * cleared — the extra clk0_enabled check would
+							 * be redundant. */
 							{
 								int i;
 								for (i = 0; i < 100; i++) {
@@ -272,6 +273,17 @@ CyFxSlFifoApplnUSBSetupCB (
 					{
 						uint32_t boot_count = health_boot_count();       /* [20..23] */
 						memcpy(&glEp0Buffer[off], &boot_count, 4); off += 4;
+					}
+					{
+						/* CLK0 diagnostic — exposes both the raw register
+						 * byte that si5351_clk0_enabled() reads and the
+						 * boolean it returns.  Lets the host see Si5351's
+						 * actual CLK0 power state and what
+						 * GpifPreflightCheck() will observe. */
+						uint8_t clk0_reg16 = 0xFF;
+						I2cTransfer(SI_CLK0_CONTROL, 0xC0, 1, &clk0_reg16, CyTrue);
+						glEp0Buffer[off++] = clk0_reg16;                 /* [24] */
+						glEp0Buffer[off++] = si5351_clk0_enabled() ? 1 : 0; /* [25] */
 					}
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
