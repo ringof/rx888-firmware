@@ -17,7 +17,8 @@ recommended way to operate the radio.
 | Stack | GNU Radio + FFTW, SoapySDR (`driver=SDDC`) |
 | Detection command | `SoapySDRUtil --find="driver=SDDC"` |
 | Upstream images | `spectregrams/spectre-server:3.5.0-alpha`, `spectregrams/spectre-cli:3.5.0-alpha` |
-| Receiver names in CLI | upstream `--receiver rx888` (to be confirmed against installed image) |
+| Receiver name in CLI | `--receiver rx888mk2` (constant `RX888MK2` in `_names.py`) |
+| Initial capture mode | `fixed_center_frequency` |
 | Output | FITS + PNG spectrogram, `.fc32` I/Q |
 | RX-888 MK II status (per wiki) | Supported ✅ |
 
@@ -68,6 +69,64 @@ that the firmware is compatible with the **GNU Radio ecosystem via
 SoapySDR-SDDC**, not merely with Spectre.  Documenting that
 explicitly is itself a deliverable of this branch (see Task 5b
 below).
+
+## Relationship to upstream Spectre (issue #239)
+
+[spectregrams/spectre#239](https://github.com/spectregrams/spectre/issues/239)
+— "Replace the firmware for the RX-888 MK II", opened 2026-05-13 by
+`jcfitzpatrick12` — proposes Spectre adopt `ringof/rx888-firmware`
+as the firmware source it bundles, replacing the binary that today
+gets uploaded via `spectregrams/ExtIO_sddc v0.0.1`.  Per author
+context (not in the public body), the switch is gated on this repo
+cutting a **1.0 release**.
+
+This reframes the present branch in three ways:
+
+1. **Direction reverses post-adoption.**  Today we are guests in
+   Spectre's build — their image bakes libsddc which uploads our
+   `.img`.  After #239 lands, the dependency reverses: Spectre's
+   image fetches `SDDC_FX3.img` from a `ringof/rx888-firmware`
+   release tag.  Their build tracks our releases; the audit
+   becomes bidirectional rather than one-way.
+
+2. **This branch sits on the 1.0 critical path.**  The bench-
+   validated PNG plot is exactly the artifact #239 needs as
+   adoption evidence ("if performance improvements are observed").
+   That means:
+   - The validation test in this branch is not just for our own
+     QA — it is the demo case for the upstream switch.
+   - The reference plot (`docs/images/spectre-validation-expected.png`)
+     should be of release quality.  Capture it from a real bench
+     run on a release-candidate firmware build, not a developer-
+     branch one.
+   - Task 7's `docs/compatibility.md` edit should reference #239
+     by URL in the "Spectre" section, so the relationship is
+     discoverable from both directions.
+
+3. **Pinning becomes a release-engineering concern.**  Once
+   Spectre's image fetches our `.img`, reproducibility of *their*
+   tests depends on a stable release tag on *our* side.  Conversely,
+   `docker/spectre/docker-compose.yml` should pin a specific
+   Spectre image tag (we already plan to: `3.5.0-alpha`) so the
+   reverse direction is reproducible too.  Bidirectional pinning
+   policy:
+   - Our compose pins `spectregrams/spectre-server:<version>`
+     and `spectregrams/spectre-cli:<version>` (no `latest`).
+   - The README documents which `SDDC_FX3.img` build the captured
+     reference plot was produced against (SHA + release tag).
+   - Bumping the Spectre tag is a documented procedure with a
+     re-run of the validation test, not a silent edit.
+
+Out of scope for this branch (capture as separate issues on
+`ringof/rx888-firmware` when the time is right):
+
+- Defining the 1.0 release criteria for this firmware (API
+  freeze, audit coverage, host-app compatibility matrix, etc.).
+  Worth its own planning doc once #239's adoption requirements
+  are clearer.
+- Adding a `ringof/rx888-firmware` issue that tracks #239 from
+  our side, so the dependency is visible without leaving the
+  repo.  Both deferred pending user direction.
 
 ## Deliverables
 
