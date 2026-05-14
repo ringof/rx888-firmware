@@ -1,533 +1,141 @@
 # Plan: Spectre Docker Test Environment for RX888mk2 Firmware
 
-Mirrors the existing `docker/ka9q-radio/` test harness with a second
-independent host application — [Spectre](https://github.com/spectregrams/spectre).
-The goal is a one-command flow that proves a freshly built
-`SDDC_FX3.img` works end-to-end with a *second*, completely different
-SoapySDR-based stack (the SDDC SoapySDR plugin → Spectre's GNU
-Radio-based capture pipeline → spectrogram PNG output).
+A second test harness alongside `docker/ka9q-radio/`, validating
+`SDDC_FX3.img` against a different host stack: SoapySDR-SDDC →
+GNU Radio (via [Spectre](https://github.com/spectregrams/spectre)).
+A green run transitively certifies the firmware on the
+SoapySDR-SDDC seam, so any GNU Radio host using `driver=SDDC` is
+covered — Spectre is the proxy test, not the only target.
 
-This is a **test/validation** container; it is not meant to be the
-recommended way to operate the radio.
+## Decisions
 
-## Why Spectre
+- **Image strategy: A — upstream images unchanged.** Use
+  `spectregrams/spectre-server:3.5.0-alpha` and `spectre-cli:3.5.0-alpha`
+  via compose; no custom Dockerfile. Recon confirmed SoapySDR-SDDC is
+  built into the image from `spectregrams/ExtIO_sddc v0.0.1`, and an
+  `rx888mk2` receiver (mode `fixed_center_frequency`) is a first-class
+  citizen in `backend/src/spectre_server/core/receivers/`.
+- **Firmware injection: layered.** A one-shot `rx888-uploader`
+  sidecar runs `rx888_stream -f /firmware/SDDC_FX3.img` before
+  `spectre-server` starts (compose `service_completed_successfully`),
+  AND the same `.img` is bind-mounted into `spectre-server` at
+  libsddc's resolved firmware path. Either layer alone has failure
+  modes the other covers (warm boot, mid-session re-upload, udev
+  races, upstream path drift); combined, the harness provably tests
+  *our* firmware regardless of libsddc internals.
+- **Validation signal: bench sig-gen at 10 MHz, –30 dBm.** Canned
+  config `rx888-siggen-10mhz.json` captures 8 MHz around 10 MHz for
+  10 s; expected plot is a flat noise floor with one bright carrier
+  at 10.000 MHz.
 
-| Property | Value |
-|---|---|
-| Stack | GNU Radio + FFTW, SoapySDR (`driver=SDDC`) |
-| Detection command | `SoapySDRUtil --find="driver=SDDC"` |
-| Upstream images | `spectregrams/spectre-server:3.5.0-alpha`, `spectregrams/spectre-cli:3.5.0-alpha` |
-| Receiver name in CLI | `--receiver rx888mk2` (constant `RX888MK2` in `_names.py`) |
-| Initial capture mode | `fixed_center_frequency` |
-| Output | FITS + PNG spectrogram, `.fc32` I/Q |
-| RX-888 MK II status (per wiki) | Supported ✅ |
-
-Spectre tests a different code path than ka9q-radio:
-
-- **SoapySDR + libsddc** firmware upload path (vs. ka9q's bespoke
-  `ezusb.c`)
-- **GNU Radio block graph** ingest (vs. ka9q's hand-rolled multicast
-  RTP fan-out)
-- **FFTW** spectrogram generation (similar to ka9q's, but driven by
-  GNU Radio's `logpwrfft` block — a different consumer of the same
-  raw stream)
-
-If both ka9q-radio *and* Spectre stream cleanly from the same
-firmware build, the firmware's USB/GPIF behaviour is portable across
-the two dominant Linux SDR ecosystems.
-
-### Wider compatibility claim: SoapySDR-SDDC + GNU Radio
-
-A green Spectre run is not just a "second host app works" datapoint
-— it is a transitive certification of the **SoapySDR-SDDC →
-GNU Radio** path for this firmware:
-
-```
-SDDC_FX3.img (this repo)
-        │  libusb / GPIF
-        ▼
-libsddc  (spectregrams/ExtIO_sddc fork, baked into spectre-server)
-        │  SoapySDR C++ API  (driver=SDDC)
-        ▼
-SoapySDR Source block  (gr-soapy, stock GNU Radio component)
-        │  GNU Radio scheduler, complex64 stream
-        ▼
-*any* GNU Radio flowgraph  (Spectre is just one consumer)
-```
-
-Spectre is the proxy test, but the link being exercised
-(`firmware → libsddc → Soapy → GNU Radio Source`) is exactly the
-same link every other GNU-Radio-based RX888 consumer uses:
-hand-rolled GRC flowgraphs, `gqrx` (when built with Soapy),
-`urh`, `gr-satellites`, custom research code, etc.  None of those
-need any RX888-specific code on their side — they ask SoapySDR for
-`driver=SDDC` and the firmware does the rest.
-
-**Consequence**: once this container produces the expected plot,
-the project can credibly state in `README.md` / `docs/compatibility.md`
-that the firmware is compatible with the **GNU Radio ecosystem via
-SoapySDR-SDDC**, not merely with Spectre.  Documenting that
-explicitly is itself a deliverable of this branch (see Task 5b
-below).
-
-## Relationship to upstream Spectre (issue #239)
+## Relationship to upstream Spectre
 
 [spectregrams/spectre#239](https://github.com/spectregrams/spectre/issues/239)
-— "Replace the firmware for the RX-888 MK II", opened 2026-05-13 by
-`jcfitzpatrick12` — proposes Spectre adopt `ringof/rx888-firmware`
-as the firmware source it bundles, replacing the binary that today
-gets uploaded via `spectregrams/ExtIO_sddc v0.0.1`.  Per author
-context (not in the public body), the switch is gated on this repo
-cutting a **1.0 release**.
+(opened 2026-05-13) proposes Spectre adopt `ringof/rx888-firmware`
+as the bundled firmware source; per author context, gated on a 1.0
+release here. Implications:
 
-This reframes the present branch in three ways:
-
-1. **Direction reverses post-adoption.**  Today we are guests in
-   Spectre's build — their image bakes libsddc which uploads our
-   `.img`.  After #239 lands, the dependency reverses: Spectre's
-   image fetches `SDDC_FX3.img` from a `ringof/rx888-firmware`
-   release tag.  Their build tracks our releases; the audit
-   becomes bidirectional rather than one-way.
-
-2. **This branch sits on the 1.0 critical path.**  The bench-
-   validated PNG plot is exactly the artifact #239 needs as
-   adoption evidence ("if performance improvements are observed").
-   That means:
-   - The validation test in this branch is not just for our own
-     QA — it is the demo case for the upstream switch.
-   - The reference plot (`docs/images/spectre-validation-expected.png`)
-     should be of release quality.  Capture it from a real bench
-     run on a release-candidate firmware build, not a developer-
-     branch one.
-   - Task 7's `docs/compatibility.md` edit should reference #239
-     by URL in the "Spectre" section, so the relationship is
-     discoverable from both directions.
-
-3. **Pinning becomes a release-engineering concern.**  Once
-   Spectre's image fetches our `.img`, reproducibility of *their*
-   tests depends on a stable release tag on *our* side.  Conversely,
-   `docker/spectre/docker-compose.yml` should pin a specific
-   Spectre image tag (we already plan to: `3.5.0-alpha`) so the
-   reverse direction is reproducible too.  Bidirectional pinning
-   policy:
-   - Our compose pins `spectregrams/spectre-server:<version>`
-     and `spectregrams/spectre-cli:<version>` (no `latest`).
-   - The README documents which `SDDC_FX3.img` build the captured
-     reference plot was produced against (SHA + release tag).
-   - Bumping the Spectre tag is a documented procedure with a
-     re-run of the validation test, not a silent edit.
-
-Out of scope for this branch (capture as separate issues on
-`ringof/rx888-firmware` when the time is right):
-
-- Defining the 1.0 release criteria for this firmware (API
-  freeze, audit coverage, host-app compatibility matrix, etc.).
-  Worth its own planning doc once #239's adoption requirements
-  are clearer.
-- Adding a `ringof/rx888-firmware` issue that tracks #239 from
-  our side, so the dependency is visible without leaving the
-  repo.  Both deferred pending user direction.
+- Direction reverses post-adoption — their build will fetch our
+  release asset; today we override their bundled blob.
+- This branch's validation PNG is the adoption evidence #239 needs;
+  the reference plot should be captured against a release-candidate
+  build, not a dev branch.
+- The layered firmware-injection design doesn't change post-#239;
+  only the source-of-truth for `SDDC_FX3.img` does (local build →
+  release-asset URL on both sides).
+- Defining 1.0 release criteria and filing a local tracking issue
+  for #239 are out of scope for this branch.
 
 ## Deliverables
 
 ```
 docker/spectre/
-├── Dockerfile              # OPTIONAL — see "Image strategy" below
-├── docker-compose.yml      # Pinned upstream images + USB/udev wiring +
-│                           # rx888-uploader sidecar service
+├── docker-compose.yml      # Pinned upstream images + USB/udev +
+│                           # rx888-uploader sidecar + bind-mounts
 ├── uploader/
-│   └── Dockerfile          # Tiny image carrying rx888_stream + our .img
-├── entrypoint.sh           # (only if we build a custom image) firmware
-│                           # upload + wisdom warm-up, mirroring ka9q
-├── spectre.sh              # Helper: build/up/cli/capture/plot/down
+│   └── Dockerfile          # debian-slim + libusb + rx888_stream
+├── spectre.sh              # Helper: up/down/reflash/status/cli/validate/clean
 ├── configs/
-│   └── rx888-siggen-10mhz.json   # Pre-canned capture config (sig-gen 10 MHz)
-├── patches/                # Empty initially; matches ka9q-radio layout
-│   └── README.md
-└── README.md               # Setup, run, validation, regression notes
+│   └── rx888-siggen-10mhz.json
+├── patches/README.md       # Placeholder, mirrors ka9q-radio layout
+└── README.md               # Hardware setup, run, validation, regression
+
+docs/spectre-compat-audit.md  # Mirrors docs/ka9q-compat-audit.md style
 ```
-
-Plus, in `docs/`:
-
-```
-docs/spectre-compat-audit.md
-```
-
-— short compatibility-audit doc, same style as
-`docs/ka9q-compat-audit.md`, capturing whatever quirks surface when
-we wire it up (firmware upload latency, udev requirement, etc.).
-
-## Image strategy — two options
-
-**Option A (recommended): Use the upstream `spectregrams/*` images
-directly via docker-compose, no custom Dockerfile.**
-
-Pros:
-
-- Zero maintenance burden on our side for the Spectre stack itself.
-- Tracks upstream's pinned `3.5.0-alpha` tag; bumping is a one-line
-  `docker-compose.yml` edit.
-- The SoapySDR-SDDC plugin inside `spectre-server` already knows how
-  to upload `SDDC_FX3.img` if pointed at it — we just need to expose
-  our newly built image to the container at the path the plugin
-  expects.
-
-Cons:
-
-- We're a guest in the upstream image; have to discover the firmware
-  search path (`/usr/share/sddc/SDDC_FX3.img` or similar) at run time
-  rather than baking it.
-- We can't preload FFTW wisdom into the image.
-
-**Option B: Build our own derived image (`FROM
-spectregrams/spectre-server:3.5.0-alpha`) that overlays our firmware
-and an entrypoint.**
-
-Pros:
-
-- Self-contained: `docker build` and the firmware is in place.
-- Symmetric with `docker/ka9q-radio/` (also builds from source).
-
-Cons:
-
-- Couples our test to a specific upstream tag at build time, not just
-  at runtime.
-- More code/CI surface to maintain.
-
-**Recommendation: start with A**, fall back to B only if the upstream
-image refuses to pick up a bind-mounted firmware path. The first task
-below is exactly the experiment that decides this.
-
-## Firmware injection (day-one requirement)
-
-A green capture against an *unmodified* `spectre-server` proves only
-that libsddc's *bundled* firmware (`spectregrams/ExtIO_sddc v0.0.1`)
-works against our hardware — it tells us nothing about whether the
-firmware build we just produced does.  To validate *our* firmware,
-the harness must replace the firmware that ends up on the FX3 with
-the fresh `SDDC_FX3.img` from this repo, the same way
-`docker/ka9q-radio/` does with its `-v $(pwd)/SDDC_FX3:/firmware`
-mount and radiod's own ezusb uploader.
-
-This is a **day-one requirement**, not a post-#239 concern.  It
-applies whenever the harness runs.
-
-### Layered design (recommended)
-
-Two mechanisms, applied together; success of either is sufficient.
-
-**Layer 1 — Pre-load via `rx888_stream`.**  A one-shot sidecar
-container (`docker/spectre/uploader/`) runs *before* `spectre-server`
-starts (compose `depends_on: { rx888-uploader: { condition:
-service_completed_successfully } }`).  It executes
-`rx888_stream -f /firmware/SDDC_FX3.img` against an FX3 in DFU
-state (PID `04b4:00f3`), waits for re-enumeration to PID
-`04b4:00f1`, and exits 0.  When libsddc inside `spectre-server`
-opens the device, it finds an already-loaded FX3 and (per its
-ordinary code path) does not re-upload.
-
-**Layer 2 — Bind-mount over libsddc's firmware path.**  The same
-`SDDC_FX3.img` is bind-mounted into `spectre-server` at whatever
-path libsddc resolves at runtime (discovered per Task 1 — usually
-`/usr/local/share/sddc/SDDC_FX3.img` or a working-directory-
-relative lookup).  If libsddc *does* decide to upload — e.g.
-because the device transiently returns to DFU mode after a USB
-reset — the upload comes from *our* `.img`, not the bundled one.
-
-### Why both layers
-
-Either alone has a failure mode that the other covers:
-
-| Scenario | Layer 1 only | Layer 2 only | Layered |
-|---|---|---|---|
-| Clean cold-boot (device in 00f3) | uploader handles it | libsddc handles it | uploader handles it |
-| Device already at 00f1 (warm boot) | uploader is a no-op | libsddc is a no-op | both are no-ops |
-| libsddc decides to re-upload mid-session | **bundled fw uploaded** | our fw uploaded | our fw uploaded |
-| Layer-1 uploader fails (e.g. udev race) | **whole stack fails** | libsddc uploads ours | libsddc uploads ours |
-| libsddc's search path changes upstream | uploader still works | **silent fallback to bundled fw** | uploader still works |
-
-The combined version provably tests *our* firmware regardless of
-libsddc internals, and remains correct as libsddc evolves
-upstream.
-
-### Carry-through to #239
-
-Post-adoption, the layered design changes only in *which* `.img`
-is the source of truth:
-
-| Stage | Source of `/firmware/SDDC_FX3.img` |
-|---|---|
-| Pre-#239, dev iteration | `SDDC_FX3/SDDC_FX3.img` from local build |
-| Pre-#239, release validation | Asset attached to a `ringof/rx888-firmware` release tag |
-| Post-#239 (upstream adoption) | Same release-asset URL; Spectre's own image-build pipeline pulls from there too |
-
-The compose file's bind-mount target and the uploader's behavior
-do not change; only the contents of `SDDC_FX3/SDDC_FX3.img` (or
-the URL behind it) does.
 
 ## Tasks
 
-1. **Reconnaissance against upstream image** (one-off, no commits)
-    - `docker pull spectregrams/spectre-server:3.5.0-alpha`
-    - `docker run --rm --entrypoint bash spectregrams/spectre-server:3.5.0-alpha
-       -c 'find / -name "SDDC_FX3*" 2>/dev/null; SoapySDRUtil --info'`
-    - Confirm: (a) SDDC SoapySDR module is present, (b) where it
-      looks for `SDDC_FX3.img`, (c) which `spectre create config
-      --receiver <name>` value maps to it.
-    - Record findings in `docs/spectre-compat-audit.md`.
-    - Output: decide Option A vs Option B.
+1. **Recon (live host, not committed):** discover libsddc's
+   firmware search path inside `spectre-server:3.5.0-alpha` via
+   `docker exec ... strings /usr/local/lib/libsddc.so | grep -E '\.(img|fw)$'`
+   and `find / -name 'SDDC_FX3*'`. Record in `docs/spectre-compat-audit.md`.
+2. **`docker-compose.yml`:** pin both image tags, mount
+   `/dev/bus/usb` + `/run/udev:ro`, bind-mount `SDDC_FX3/SDDC_FX3.img`
+   at libsddc's path (from task 1), bind-mount `./capture/` for
+   PNG/FITS outputs, wire `rx888-uploader` with
+   `depends_on: { rx888-uploader: { condition: service_completed_successfully } }`.
+3. **`uploader/Dockerfile`:** debian-slim + `libusb-1.0-0` + a built
+   `rx888_stream` from `tests/rx888_tools`. Entrypoint detects PID
+   `04b4:00f3` → uploads; `04b4:00f1` → no-op; neither → fails.
+4. **`spectre.sh`:** `up`, `down`, `reflash` (re-run uploader only),
+   `status` (`SoapySDRUtil --find=driver=SDDC` + `lsusb -d 04b4:`),
+   `cli`, `validate`, `clean`.
+5. **`configs/rx888-siggen-10mhz.json`:** receiver `rx888mk2`, mode
+   `fixed_center_frequency`, center 10 MHz, rate 8 MHz, 10 s, tag
+   `rx888-siggen-10mhz`. Param keys confirmed against
+   `spectre create config --help` at first run.
+6. **`README.md`:** mirrors `docker/ka9q-radio/README.md` —
+   `lsusb -d 04b4:` walkthrough, run instructions, validation
+   procedure with expected plot description, regression note
+   (ka9q-radio container still works against same firmware after
+   Spectre run), pointer to compat audit.
+7. **`docs/spectre-compat-audit.md`:** mirrors
+   `docs/ka9q-compat-audit.md`'s structure; initially holds recon
+   findings (libsddc fork SHA, firmware path, receiver/mode names).
+8. **Doc claim (gated on green real-hardware run):** add "Spectre"
+   and "SoapySDR-SDDC + GNU Radio" sections to `docs/compatibility.md`
+   and update `README.md`'s host-app list. Lands as a later commit
+   on this branch, only after the validation test produces the
+   expected plot.
 
-2. **`docker/spectre/docker-compose.yml`**
-    - Pin `spectregrams/spectre-server:3.5.0-alpha` and
-      `spectregrams/spectre-cli:3.5.0-alpha` (explicit tags, no
-      `latest`).
-    - Bind-mount `/dev/bus/usb`, `/run/udev:ro` (same rationale as
-      ka9q — libusb hotplug after PID flip).
-    - **Inject our firmware (layered)** — see "Firmware injection"
-      below.  The compose file adds an `rx888-uploader` one-shot
-      sidecar service that runs before `spectre-server` via
-      `depends_on: { rx888-uploader: { condition: service_completed_successfully } }`,
-      AND bind-mounts `SDDC_FX3/SDDC_FX3.img` into `spectre-server`
-      at libsddc's resolved search path (discovered per Task 1).
-    - Bind-mount a host `./capture/` directory to the server's data
-      volume so PNG/FITS outputs land on the host without a final
-      `spectre get files` copy step.
-    - Comment every non-obvious line; specifically why
-      `--privileged`-equivalent (`device: /dev/bus/usb` plus
-      cap-adds, NOT `privileged: true` if avoidable) is needed.
+## Validation test
 
-2b. **`docker/spectre/uploader/Dockerfile`** (sidecar — new)
-    - Small image (`debian:bookworm-slim` + `libusb-1.0-0` + a
-      built `rx888_stream` from the existing `tests/rx888_tools`
-      submodule).
-    - Bakes nothing firmware-specific; the `.img` comes in via
-      bind-mount so we can test new builds without rebuilding the
-      uploader image.
-    - Entrypoint: detect FX3 USB state, then either
-      (a) PID 04b4:00f3 → run `rx888_stream -f /firmware/SDDC_FX3.img`,
-          wait for re-enumeration to 04b4:00f1, exit 0
-      (b) PID 04b4:00f1 already → exit 0 (idempotent: nothing to do)
-      (c) Neither → exit non-zero with a clear "no FX3 found"
-          message; compose `depends_on` will then prevent
-          `spectre-server` from starting against a missing device.
+Bench: signal generator → RX888mk2 SMA, single CW tone at 10.000 MHz,
+–30 dBm.
 
-3. **`docker/spectre/spectre.sh`** (helper, parallels `ka9q.sh`)
-    - `up`                — `docker compose up -d`  (uploader
-                            runs first, then spectre-server/cli)
-    - `down`              — `docker compose down`
-    - `reflash`           — re-run just the rx888-uploader service
-                            against the current
-                            `SDDC_FX3/SDDC_FX3.img`, without
-                            tearing down spectre-server.  Useful
-                            when iterating on firmware between
-                            captures.
-    - `status`            — show device detection
-                            (`SoapySDRUtil --find="driver=SDDC"`)
-                            AND `lsusb -d 04b4:` so the operator
-                            sees which PID the FX3 is currently in.
-    - `cli ...`           — `docker exec -it spectre-cli spectre $@`
-    - `validate`          — runs the canned end-to-end capture
-                            described in "Validation test" below and
-                            returns non-zero if the resulting PNG is
-                            absent or below a size threshold (cheap
-                            sanity).
-    - `clean`             — wipe `./capture/` and the `spectre-data-v3`
-                            volume.
-
-4. **`docker/spectre/configs/rx888-siggen-10mhz.json`** (canned config)
-    - Receiver: `rx888mk2`
-    - Mode: `fixed_center_frequency`
-    - Centre freq: 10.000 MHz (matches a sig-gen tone on the SMA
-      input)
-    - Sample rate: 8 MHz (HF direct-sampling; trade-off documented
-      in the README)
-    - Duration: 10 s
-    - FFT bin width / window: sensible defaults producing a 1024-bin
-      spectrogram
-    - Tag: `rx888-siggen-10mhz`
-
-5. **`docker/spectre/README.md`** (modelled after
-   `docker/ka9q-radio/README.md`)
-    - Hardware setup section — exactly the same `lsusb` /
-      `04b4:00f3` vs `00f1` walkthrough as the ka9q README, so the
-      two are interchangeable.
-    - "Build" section — note that the only build step is
-      `docker compose pull` (Option A), or
-      `docker build -t spectre-rx888 docker/spectre/` (Option B).
-    - "Load our firmware" section — what file goes where, how to
-      verify it is the firmware that booted (USB PID 00F1, plus an
-      in-container `dmesg`-or-equivalent check).
-    - "Validation test" section — the WWV capture procedure (see
-      below), including the expected PNG appearance.
-    - "Regression test" section — re-running the ka9q-radio
-      container against the same firmware after the Spectre test
-      should still succeed; both pipelines should produce live
-      streams independently.
-    - Known compatibility notes section (initially empty; fill from
-      `docs/spectre-compat-audit.md`).
-
-6. **`docs/spectre-compat-audit.md`**
-    - Mirror `docs/ka9q-compat-audit.md`'s structure.
-    - One-line summary per identified issue: severity, where it
-      lives (upstream/libsddc/firmware), whether we patched, link
-      to patch.
-    - Initially: just the recon findings from task 1.
-
-7. **Update `docs/compatibility.md` and `README.md` (Task 5b — the
-   GNU Radio claim)**
-    - Add a new "## Spectre" section to `docs/compatibility.md`
-      paralleling the existing "## ka9q-radio" section, pointing
-      at `docker/spectre/` and `docs/spectre-compat-audit.md`.
-    - Add a new "## SoapySDR-SDDC + GNU Radio" section to
-      `docs/compatibility.md` immediately after it, framing the
-      Spectre container as the *validation harness* for a broader
-      compatibility claim: any Soapy-aware GNU Radio host
-      (`driver=SDDC`) can consume this firmware without
-      RX888-specific code on its side.  Be precise about what is
-      and is not validated — we only run one flowgraph (Spectre's
-      fixed_center_frequency mode), so the claim is "validated on
-      the SoapySDR-SDDC seam, not on every block downstream of it".
-      Reference the diagram from PLAN_SPECTRE_DOCKER.md inline.
-    - Add the same hosts to the bullet list in the top-level
-      `README.md`'s "Compatible host applications" section.
-    - Do NOT make this claim until the validation test in Task 5
-      has actually been run on real hardware and produced the
-      expected plot — these doc edits are *gated* on a green run
-      and should ride a later commit on the same branch.
-
-8. **CI integration** *(out of scope for this branch; capture as a
-   follow-up issue)*
-    - The ka9q docker test is host-attached (requires real hardware)
-      and is not in CI. Spectre will be the same.
-
-## Validation test (the "expected plot")
-
-Bench setup: a signal generator driving the RX888mk2's HF SMA input
-with a single CW tone at 10.000 MHz, –30 dBm (well above the
-noise floor, well below saturation).
-
-The README's validation procedure — and `spectre.sh validate` — does:
-
-1. `./spectre.sh up`
-2. Confirm device detection:
-   `./spectre.sh status` → must list one `driver=SDDC` device
-   (output of `SoapySDRUtil --find="driver=SDDC"`).
-3. Inside `spectre-cli`:
-   - `spectre create config --receiver rx888mk2 \
-        --mode fixed_center_frequency \
-        --tag rx888-siggen-10mhz \
-        --param center_freq=10000000 \
-        --param sample_rate=8000000`
-     *(exact `--param` keys to be confirmed against the CLI help
-     emitted by `spectre create config --receiver rx888mk2 --mode
-     fixed_center_frequency --help` on first run; this is the
-     working set per upstream's tutorial pattern.)*
-   - `spectre record spectrograms --tag rx888-siggen-10mhz --duration 10`
-   - `spectre create plot --tag rx888-siggen-10mhz \
-        --obs-date $(date -u +%F) \
-        --start-time <now-15s> --end-time <now>`
+1. `./spectre.sh up` — uploader runs, FX3 ends at PID `00f1`,
+   spectre-server comes up.
+2. `./spectre.sh status` → one `driver=SDDC` device.
+3. Via `spectre-cli`: `spectre create config --receiver rx888mk2
+   --mode fixed_center_frequency --tag rx888-siggen-10mhz
+   --param center_freq=10000000 --param sample_rate=8000000`
+   → `spectre record spectrograms --tag rx888-siggen-10mhz
+   --duration 10` → `spectre create plot --tag rx888-siggen-10mhz
+   --obs-date ... --start-time ... --end-time ...`.
 4. `./capture/<tag>/<date>/*.png` exists, >50 kB.
-5. **Expected appearance**: a flat, dark noise-floor band across
-   the full 8 MHz capture span (~6–14 MHz with centre at 10 MHz),
-   with one bright, narrow horizontal line at 10.000 MHz running
-   the full duration. No other strong tones; no aliasing wraps
-   visible at the band edges. A reference image of this expected
-   plot will live at
-   `docs/images/spectre-validation-expected.png` (committed once
-   the test has actually run on real hardware).
-6. Optional second pass with the sig-gen retuned to 5.000 MHz and
-   the centre frequency re-tuned to 5 MHz, to demonstrate retune
-   works.
-
-The PNG (a render of the FITS spectrogram) is what we ship back to
-the user as "an expected plot."
+5. Expected: flat noise floor across ~6–14 MHz, single bright
+   horizontal line at 10.000 MHz, no aliasing wraps. Reference image
+   committed to `docs/images/spectre-validation-expected.png` after
+   first successful real-hardware run.
 
 ## Regression test
 
-After the Spectre validation test passes:
+After a green Spectre run on a given `SDDC_FX3.img`:
 
-1. `./spectre.sh down`
-2. `cd ../ka9q-radio && ./ka9q.sh start` (existing harness).
-3. Confirm the ka9q-radio container streams from the same firmware
-   image without rebuild or re-flash.
-4. `./ka9q.sh stop`.
+1. `./spectre.sh down`.
+2. `cd ../ka9q-radio && ./ka9q.sh start` — same firmware, no
+   rebuild, no re-flash.
+3. ka9q-radio streams normally; `./ka9q.sh stop`.
 
-Both pipelines independently consuming the same firmware in the same
-session demonstrates the firmware is not silently coupled to one
+Both pipelines independently consuming the same firmware in the
+same session proves the firmware isn't silently coupled to one
 host stack.
 
-## Reconnaissance findings (2026-05-14)
+## Open question
 
-Docker daemon was unavailable in the planning environment, so the
-recon was done against the upstream source tree on GitHub instead of
-the pulled image.  Findings:
-
-1. **Upstream supports RX-888 MK II natively**, as a first-class
-   receiver alongside SDRplay/HackRF/RTL-SDR/USRP:
-   - Receiver constant: `RX888MK2` →
-     `backend/src/spectre_server/core/receivers/_names.py`
-   - Receiver module:
-     `backend/src/spectre_server/core/receivers/_rx888mk2.py`
-   - CLI receiver name (used with `spectre create config
-     --receiver …`): `rx888mk2` (lowercased per the convention
-     visible in `_names.py`).
-2. **Initial supported capture mode**: `fixed_center_frequency`
-   (one mode, no sweep yet).
-3. **SoapySDR-SDDC is baked into `spectre-server`** — built from
-   the upstream fork `spectregrams/ExtIO_sddc` (tag `v0.0.1`) and
-   installed into `/usr/local/lib`. The image at
-   `spectregrams/spectre-server:3.5.0-alpha` already contains
-   everything needed to talk to a connected RX888 over USB.
-4. **No firmware blob (`SDDC_FX3.img`) is baked into the image.**
-   libsddc is expected to upload firmware to the FX3 over USB on
-   first `open()`, reading the `.img` from a path it discovers at
-   runtime. The exact search path was NOT determinable from source
-   inspection alone (it's resolved by libsddc's `unique_filename`
-   logic).  The remaining recon — a 30-second `docker exec ...
-   strings` / `find` against a running `spectre-server` — must
-   happen on a host with the docker daemon up.  Until then, the
-   README will list **candidate** bind-mount targets (most likely
-   `/usr/local/share/sddc/SDDC_FX3.img` or `/app/.spectre-data/firmware/SDDC_FX3.img`),
-   plus a one-liner the user runs to confirm.
-5. **USB plumbing is identical to the ka9q-radio container.**
-   Upstream `setup.sh` installs a udev rule for vendor `04b4`
-   (Cypress FX3) under `spectre-group`, which is the GID passed
-   in via `SPECTRE_GID` to `group_add` in compose. We piggy-back
-   on that mechanism rather than reinventing it.
-
-**Conclusion: Option A is the right starting point.** We use the
-upstream compose stack unchanged; our addition is purely
-configuration (a `docker-compose.override.yml` or our own
-`docker-compose.yml` that copies the relevant fields from upstream's
-and adds the firmware bind-mount) plus a helper script and
-documentation.  Option B (custom `FROM …` image) is only justified
-if step 4's firmware-path resolution turns out to require code
-changes, which we do not yet have evidence for.
-
-## Resolved choices (from user)
-
-- **Image strategy**: decided after recon — **Option A** above.
-- **Validation RF target**: bench sig-gen at 10 MHz. The canned
-  config and the README's "expected plot" walk-through assume a
-  signal generator on the SMA input rather than an over-the-air
-  WWV capture.
-- **GitHub issue script**: not generated; implement everything on
-  the current branch `claude/add-spectre-docker-test-2qL6R`.
-
-## Remaining open question (to answer at first run on a real host)
-
-**Where does libsddc inside `spectre-server:3.5.0-alpha` expect
-`SDDC_FX3.img`?** Resolution procedure, documented in the README:
-
-```
-# After `./spectre.sh up` (or `docker compose up -d`):
-docker exec spectre-server bash -c \
-  'strings /usr/local/lib/libsddc.so /usr/local/lib/SoapySDDC.so 2>/dev/null \
-   | grep -iE "\.(img|fw)$|/share/sddc|/firmware" | sort -u'
-docker exec spectre-server find / -name "SDDC_FX3*.img" 2>/dev/null
-```
-
-Whichever path libsddc references is the bind-mount target in
-`docker-compose.yml`.  If libsddc looks in a writable working
-directory (e.g. `$PWD`), we bind-mount our firmware into the
-container's WORKDIR and add a one-line note in the README.
+Libsddc's exact firmware search path inside
+`spectre-server:3.5.0-alpha` is the only unknown remaining. It
+must be resolved by task 1 on a host with docker running; until
+then, the bind-mount target in task 2 is parameterized as `${SDDC_FW_PATH}`
+with candidate values `/usr/local/share/sddc/SDDC_FX3.img` and the
+container WORKDIR. README documents the one-liner that resolves it.
