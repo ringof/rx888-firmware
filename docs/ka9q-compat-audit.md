@@ -1,3 +1,9 @@
+---
+title: ka9q-radio compat audit
+nav_order: 10
+permalink: /ka9q-compat-audit/
+---
+
 # ka9q-radio ↔ SDDC_FX3 Compatibility Audit
 
 Status: **initial findings, container-side patches landed**

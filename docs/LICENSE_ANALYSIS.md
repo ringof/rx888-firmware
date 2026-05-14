@@ -1,3 +1,9 @@
+---
+title: License analysis
+nav_order: 11
+permalink: /LICENSE_ANALYSIS/
+---
+
 # License Analysis
 
 ## 1. Current License Landscape

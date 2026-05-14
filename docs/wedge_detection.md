@@ -1,3 +1,9 @@
+---
+title: Wedge detection
+nav_order: 8
+permalink: /wedge_detection/
+---
+
 # GPIF Clock Loss Detection and Wedge Recovery
 
 ## The problem

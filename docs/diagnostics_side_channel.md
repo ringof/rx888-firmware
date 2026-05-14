@@ -1,3 +1,9 @@
+---
+title: Diagnostics side-channel
+nav_order: 7
+permalink: /diagnostics_side_channel/
+---
+
 # Firmware-Side Diagnostics for Host Streamer Software
 
 > **Status: Partially implemented.**
