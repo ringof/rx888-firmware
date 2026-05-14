@@ -46,9 +46,9 @@ WORKDIR /build/ka9q-radio
 # even when zero active patches exist — disabled/historical patches kept
 # in-tree under *.patch.disabled are intentionally skipped by the glob.
 COPY patches/ /tmp/patches/
-RUN shopt -s nullglob; \
-    applied=0; \
+RUN applied=0; \
     for p in /tmp/patches/*.patch; do \
+        [ -e "$p" ] || break; \
         echo "Applying $p"; \
         git apply --whitespace=nowarn "$p"; \
         applied=$((applied+1)); \
