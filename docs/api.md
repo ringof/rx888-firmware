@@ -285,10 +285,10 @@ emitted (`USBHandler.c:248-251`).
 
 ### GETSTATS
 
-Source: `SDDC_FX3/USBHandler.c:255-279`.
+Source: `SDDC_FX3/USBHandler.c:256-289`.
 
 Reads back diagnostic counters and state.  The firmware fills a
-fixed-layout buffer up to 24 bytes total.
+fixed-layout buffer of 26 bytes total.
 
 | Field         | Value               |
 |---------------|---------------------|
@@ -296,7 +296,7 @@ fixed-layout buffer up to 24 bytes total.
 | `bmRequestType` | `0xC0`            |
 | `wValue`      | 0 (ignored)         |
 | `wIndex`      | 0 (ignored)         |
-| `wLength`     | ≤ 64 (firmware sends 24) |
+| `wLength`     | ≤ 64 (firmware sends 26) |
 
 **Byte layout** (little-endian for multi-byte fields):
 
@@ -308,12 +308,16 @@ fixed-layout buffer up to 24 bytes total.
 | 9–10   | u16   | `glLastPibArg`    | Last argument captured from the PIB error path (see `gpif-and-recovery.md`). |
 | 11–14  | u32   | `glCounter[1]`    | Counter 1 — currently used for unclean-stop events. |
 | 15–18  | u32   | `glCounter[2]`    | Counter 2 — EP underrun count (`USBHandler.c:563`). |
-| 19     | u8    | Si5351 reg 0      | Live read of Si5351 status register (PLL lock bits).  Useful for confirming the ADC clock health without separately issuing `I2CRFX3`. |
-| 20–23  | u32   | `boot_count`      | Increments once per firmware `health_init()` call.  Use to detect mid-test resets: snapshot before, compare after; mismatch means the device reset.  (`SDDC_FX3/health.c:health_boot_count`.) |
+| 19     | u8    | Si5351 reg 0      | Live read of Si5351 status register (PLL lock bits).  Useful for confirming the ADC clock health without separately issuing `I2CRFX3`. (`USBHandler.c:271`.) |
+| 20–23  | u32   | `boot_count`      | Increments once per firmware `health_init()` call.  Use to detect mid-test resets: snapshot before, compare after; mismatch means the device reset.  (`USBHandler.c:275`, `SDDC_FX3/health.c:health_boot_count`.) |
+| 24     | u8    | Si5351 CLK0_CONTROL (reg 16) | Live I2C read of the Si5351 CLK0 output-driver control register.  Bit 7 is `CLK0_PDN` — set means CLK0 powered down, clear means CLK0 enabled.  Returns `0xFF` if the I2C read fails.  (`USBHandler.c:283-285`.) |
+| 25     | u8    | `clk0_result`     | Result of the firmware's `si5351_clk0_enabled()` query: `1` = CLK0 enabled (bit 7 clear and I2C read succeeded), `0` = disabled or I2C error.  This is the same value `GpifPreflightCheck()` consults at [`STARTFX3`](#startfx3) time.  (`USBHandler.c:286`.) |
 
-The firmware sends exactly 24 bytes via `CyU3PUsbSendEP0Data`; hosts
-should request `wLength=24` (or up to 64) and read the prefix that
-fits.
+The firmware sends exactly 26 bytes via `CyU3PUsbSendEP0Data`; hosts
+should request `wLength=26` (or up to 64) and read the prefix that
+fits.  Hosts written against an earlier firmware that requested
+`wLength=24` continue to work — the firmware will return only the 24
+bytes requested, omitting the new Si5351 CLK0 bytes.
 
 ### SETARGFX3
 
