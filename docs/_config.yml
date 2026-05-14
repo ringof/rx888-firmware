@@ -1,0 +1,36 @@
+title: rx888-firmware
+description: >-
+  Cypress FX3 USB controller firmware for the RX888 mk2 direct-sampling SDR
+  receiver. HF reception (0–32 MHz) via the on-board LTC2208 ADC.
+url: https://ringof.github.io
+baseurl: /rx888-firmware
+
+remote_theme: just-the-docs/just-the-docs
+
+permalink: pretty
+
+color_scheme: dark
+
+search_enabled: true
+search:
+  heading_level: 3
+  previews: 2
+  preview_words_before: 3
+  preview_words_after: 3
+
+aux_links:
+  "GitHub":
+    - "https://github.com/ringof/rx888-firmware"
+  "Releases":
+    - "https://github.com/ringof/rx888-firmware/releases"
+aux_links_new_tab: true
+
+heading_anchors: true
+
+footer_content: >-
+  MIT-licensed firmware. The Cypress FX3 SDK is covered by the Cypress Software
+  License Agreement.
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag

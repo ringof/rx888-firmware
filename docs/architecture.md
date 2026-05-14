@@ -1,3 +1,9 @@
+---
+title: Architecture
+nav_order: 5
+permalink: /architecture/
+---
+
 # RX888mk2 Firmware Architecture
 
 ## What the RX888mk2 is

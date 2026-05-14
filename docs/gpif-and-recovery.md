@@ -1,3 +1,9 @@
+---
+title: GPIF & Recovery
+nav_order: 6
+permalink: /gpif-and-recovery/
+---
+
 # GPIF State Machine and Recovery Architecture
 
 This document describes the GPIF II state machine design, the soft-stop

@@ -1,3 +1,9 @@
+---
+title: Vendor protocol plan
+nav_order: 9
+permalink: /vendor-protocol-plan/
+---
+
 # Vendor Protocol Evolution Plan
 
 **Status:** approved for execution
