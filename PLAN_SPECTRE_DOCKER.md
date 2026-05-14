@@ -133,12 +133,15 @@ Out of scope for this branch (capture as separate issues on
 ```
 docker/spectre/
 ├── Dockerfile              # OPTIONAL — see "Image strategy" below
-├── docker-compose.yml      # Pinned upstream images + USB/udev wiring
+├── docker-compose.yml      # Pinned upstream images + USB/udev wiring +
+│                           # rx888-uploader sidecar service
+├── uploader/
+│   └── Dockerfile          # Tiny image carrying rx888_stream + our .img
 ├── entrypoint.sh           # (only if we build a custom image) firmware
 │                           # upload + wisdom warm-up, mirroring ka9q
 ├── spectre.sh              # Helper: build/up/cli/capture/plot/down
 ├── configs/
-│   └── rx888-hf-wwv.json   # Pre-canned capture config used by validation
+│   └── rx888-siggen-10mhz.json   # Pre-canned capture config (sig-gen 10 MHz)
 ├── patches/                # Empty initially; matches ka9q-radio layout
 │   └── README.md
 └── README.md               # Setup, run, validation, regression notes
@@ -195,6 +198,73 @@ Cons:
 image refuses to pick up a bind-mounted firmware path. The first task
 below is exactly the experiment that decides this.
 
+## Firmware injection (day-one requirement)
+
+A green capture against an *unmodified* `spectre-server` proves only
+that libsddc's *bundled* firmware (`spectregrams/ExtIO_sddc v0.0.1`)
+works against our hardware — it tells us nothing about whether the
+firmware build we just produced does.  To validate *our* firmware,
+the harness must replace the firmware that ends up on the FX3 with
+the fresh `SDDC_FX3.img` from this repo, the same way
+`docker/ka9q-radio/` does with its `-v $(pwd)/SDDC_FX3:/firmware`
+mount and radiod's own ezusb uploader.
+
+This is a **day-one requirement**, not a post-#239 concern.  It
+applies whenever the harness runs.
+
+### Layered design (recommended)
+
+Two mechanisms, applied together; success of either is sufficient.
+
+**Layer 1 — Pre-load via `rx888_stream`.**  A one-shot sidecar
+container (`docker/spectre/uploader/`) runs *before* `spectre-server`
+starts (compose `depends_on: { rx888-uploader: { condition:
+service_completed_successfully } }`).  It executes
+`rx888_stream -f /firmware/SDDC_FX3.img` against an FX3 in DFU
+state (PID `04b4:00f3`), waits for re-enumeration to PID
+`04b4:00f1`, and exits 0.  When libsddc inside `spectre-server`
+opens the device, it finds an already-loaded FX3 and (per its
+ordinary code path) does not re-upload.
+
+**Layer 2 — Bind-mount over libsddc's firmware path.**  The same
+`SDDC_FX3.img` is bind-mounted into `spectre-server` at whatever
+path libsddc resolves at runtime (discovered per Task 1 — usually
+`/usr/local/share/sddc/SDDC_FX3.img` or a working-directory-
+relative lookup).  If libsddc *does* decide to upload — e.g.
+because the device transiently returns to DFU mode after a USB
+reset — the upload comes from *our* `.img`, not the bundled one.
+
+### Why both layers
+
+Either alone has a failure mode that the other covers:
+
+| Scenario | Layer 1 only | Layer 2 only | Layered |
+|---|---|---|---|
+| Clean cold-boot (device in 00f3) | uploader handles it | libsddc handles it | uploader handles it |
+| Device already at 00f1 (warm boot) | uploader is a no-op | libsddc is a no-op | both are no-ops |
+| libsddc decides to re-upload mid-session | **bundled fw uploaded** | our fw uploaded | our fw uploaded |
+| Layer-1 uploader fails (e.g. udev race) | **whole stack fails** | libsddc uploads ours | libsddc uploads ours |
+| libsddc's search path changes upstream | uploader still works | **silent fallback to bundled fw** | uploader still works |
+
+The combined version provably tests *our* firmware regardless of
+libsddc internals, and remains correct as libsddc evolves
+upstream.
+
+### Carry-through to #239
+
+Post-adoption, the layered design changes only in *which* `.img`
+is the source of truth:
+
+| Stage | Source of `/firmware/SDDC_FX3.img` |
+|---|---|
+| Pre-#239, dev iteration | `SDDC_FX3/SDDC_FX3.img` from local build |
+| Pre-#239, release validation | Asset attached to a `ringof/rx888-firmware` release tag |
+| Post-#239 (upstream adoption) | Same release-asset URL; Spectre's own image-build pipeline pulls from there too |
+
+The compose file's bind-mount target and the uploader's behavior
+do not change; only the contents of `SDDC_FX3/SDDC_FX3.img` (or
+the URL behind it) does.
+
 ## Tasks
 
 1. **Reconnaissance against upstream image** (one-off, no commits)
@@ -213,8 +283,12 @@ below is exactly the experiment that decides this.
       `latest`).
     - Bind-mount `/dev/bus/usb`, `/run/udev:ro` (same rationale as
       ka9q — libusb hotplug after PID flip).
-    - Bind-mount our `SDDC_FX3/SDDC_FX3.img` to wherever step 1 says
-      libsddc/SoapySDR-SDDC expects it.
+    - **Inject our firmware (layered)** — see "Firmware injection"
+      below.  The compose file adds an `rx888-uploader` one-shot
+      sidecar service that runs before `spectre-server` via
+      `depends_on: { rx888-uploader: { condition: service_completed_successfully } }`,
+      AND bind-mounts `SDDC_FX3/SDDC_FX3.img` into `spectre-server`
+      at libsddc's resolved search path (discovered per Task 1).
     - Bind-mount a host `./capture/` directory to the server's data
       volume so PNG/FITS outputs land on the host without a final
       `spectre get files` copy step.
@@ -222,11 +296,35 @@ below is exactly the experiment that decides this.
       `--privileged`-equivalent (`device: /dev/bus/usb` plus
       cap-adds, NOT `privileged: true` if avoidable) is needed.
 
+2b. **`docker/spectre/uploader/Dockerfile`** (sidecar — new)
+    - Small image (`debian:bookworm-slim` + `libusb-1.0-0` + a
+      built `rx888_stream` from the existing `tests/rx888_tools`
+      submodule).
+    - Bakes nothing firmware-specific; the `.img` comes in via
+      bind-mount so we can test new builds without rebuilding the
+      uploader image.
+    - Entrypoint: detect FX3 USB state, then either
+      (a) PID 04b4:00f3 → run `rx888_stream -f /firmware/SDDC_FX3.img`,
+          wait for re-enumeration to 04b4:00f1, exit 0
+      (b) PID 04b4:00f1 already → exit 0 (idempotent: nothing to do)
+      (c) Neither → exit non-zero with a clear "no FX3 found"
+          message; compose `depends_on` will then prevent
+          `spectre-server` from starting against a missing device.
+
 3. **`docker/spectre/spectre.sh`** (helper, parallels `ka9q.sh`)
-    - `up`                — `docker compose up -d`
+    - `up`                — `docker compose up -d`  (uploader
+                            runs first, then spectre-server/cli)
     - `down`              — `docker compose down`
+    - `reflash`           — re-run just the rx888-uploader service
+                            against the current
+                            `SDDC_FX3/SDDC_FX3.img`, without
+                            tearing down spectre-server.  Useful
+                            when iterating on firmware between
+                            captures.
     - `status`            — show device detection
                             (`SoapySDRUtil --find="driver=SDDC"`)
+                            AND `lsusb -d 04b4:` so the operator
+                            sees which PID the FX3 is currently in.
     - `cli ...`           — `docker exec -it spectre-cli spectre $@`
     - `validate`          — runs the canned end-to-end capture
                             described in "Validation test" below and
