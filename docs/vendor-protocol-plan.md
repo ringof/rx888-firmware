@@ -62,7 +62,16 @@ This principle binds **every** firmware change in this plan.  Each commit must i
 
 Each commit is independently mergeable.  Order matters only for documentation cross-references.
 
-### Commit 1 — `fix(Si5351): query CLK0_PDN directly instead of trusting STARTADC flag`
+### Commit 1 — `fix(Si5351): query CLK0_PDN directly instead of trusting STARTADC flag` ✅ DONE (v0.1.0)
+
+> **Shipped** in commit
+> [`13b2091`](https://github.com/ringof/rx888-firmware/commit/13b2091)
+> via PR #122, released in **v0.1.0**.  The companion docker change
+> (Commit 2 below — retire patch 03) shipped in the same PR.  Scope
+> was slightly extended in flight: `GETSTATS` was widened from 24 to 26
+> bytes to expose CLK0_CONTROL raw byte ([24]) and the boolean
+> chip-query result ([25]) for diagnostics.  Subsections preserved
+> below as historical record.
 
 **Scope:** `SDDC_FX3/driver/Si5351.c` only (~20 lines edited / removed).
 
@@ -80,7 +89,19 @@ Each commit is independently mergeable.  Order matters only for documentation cr
 
 **Risk:** low.  `I2cTransfer()` is a proven path (used by `si5351_pll_locked`).  Reading register 16 is non-destructive.
 
-### Commit 2 — `refactor(docker): drop ka9q patch 03; firmware fix supersedes it`
+### Commit 2 — `refactor(docker): drop ka9q patch 03; firmware fix supersedes it` ✅ DONE (v0.1.0)
+
+> **Shipped** in PR #122 (commit
+> [`60af0b7`](https://github.com/ringof/rx888-firmware/commit/60af0b7)),
+> released in **v0.1.0**.  Implementation diverged slightly from the
+> plan: rather than deleting the patch outright, it was renamed to
+> `03-startadc-before-startfx3.patch.disabled` so the Dockerfile glob
+> skips it but the historical record stays in-tree.  The
+> Dockerfile loop was also hardened with a POSIX empty-glob guard
+> (commit
+> [`0993747`](https://github.com/ringof/rx888-firmware/commit/0993747))
+> after a Codex review flagged the original `shopt -s nullglob`
+> approach as bash-only.
 
 **Scope:** test-harness side only.
 

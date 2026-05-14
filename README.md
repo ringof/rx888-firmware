@@ -3,6 +3,8 @@
 [![Latest release](https://img.shields.io/github/v/release/ringof/rx888-firmware?include_prereleases&label=latest%20release)](https://github.com/ringof/rx888-firmware/releases/latest)
 [![Build](https://github.com/ringof/rx888-firmware/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ringof/rx888-firmware/actions/workflows/build.yml?query=branch%3Amain)
 
+**Documentation:** [ringof.github.io/rx888-firmware](https://ringof.github.io/rx888-firmware/) — USB API reference, GPIO map, host-application compatibility, and architecture notes.
+
 Cypress FX3 USB controller firmware for the **RX888 mk2** (also written
 RX888mk2) direct-sampling SDR receiver. HF reception (0–32 MHz) via the
 on-board LTC2208 ADC; the R828D VHF tuner is detected but not driven by

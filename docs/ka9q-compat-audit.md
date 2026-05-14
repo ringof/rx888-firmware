@@ -6,7 +6,7 @@ permalink: /ka9q-compat-audit/
 
 # ka9q-radio ↔ SDDC_FX3 Compatibility Audit
 
-Status: **initial findings, container-side patches landed**
+Status: **container-side patches retired in v0.1.0** — the only host-side workaround (patch 03) is no longer needed; see §8 for the firmware fix.
 
 This document captures a static compatibility audit of ka9q-radio's
 `rx888.so` plugin against the SDDC_FX3 firmware in this repository.
@@ -159,7 +159,19 @@ PLL programming (`docs/architecture.md` §"Frequency setting
 algorithm"); ka9q also sleeps ~1 s host-side around PLL config
 (`rx888.c:400`). Total ~2 s; slower than necessary but not broken.
 
-### 8. Show-stopper: missing `STARTADC` before `STARTFX3` *(ka9q-side)*
+### 8. Show-stopper: missing `STARTADC` before `STARTFX3` *(resolved firmware-side in v0.1.0)*
+
+> **Resolved in firmware** (commit
+> [`13b2091`](https://github.com/ringof/rx888-firmware/commit/13b2091),
+> released in **v0.1.0**).  `si5351_clk0_enabled()` now reads CLK0_CONTROL
+> register 16 bit 7 over I2C instead of consulting a stale
+> `glAdcClockEnabled` host-cache flag.  `GpifPreflightCheck()` therefore
+> sees the live chip state, ka9q-radio's direct Si5351 programming
+> path passes preflight without `STARTADC`, and patch 03 has been
+> retired (kept in-tree as `.patch.disabled` for archaeology — see
+> `docker/ka9q-radio/patches/README.md`).  The analysis below is
+> preserved as a record of the original failure mode.
+
 
 ka9q programs the Si5351 directly via raw `I2CWFX3` writes
 (`rx888.c:331`, `rx888.c:340`) and intentionally never calls
