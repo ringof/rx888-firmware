@@ -35,6 +35,40 @@ If both ka9q-radio *and* Spectre stream cleanly from the same
 firmware build, the firmware's USB/GPIF behaviour is portable across
 the two dominant Linux SDR ecosystems.
 
+### Wider compatibility claim: SoapySDR-SDDC + GNU Radio
+
+A green Spectre run is not just a "second host app works" datapoint
+— it is a transitive certification of the **SoapySDR-SDDC →
+GNU Radio** path for this firmware:
+
+```
+SDDC_FX3.img (this repo)
+        │  libusb / GPIF
+        ▼
+libsddc  (spectregrams/ExtIO_sddc fork, baked into spectre-server)
+        │  SoapySDR C++ API  (driver=SDDC)
+        ▼
+SoapySDR Source block  (gr-soapy, stock GNU Radio component)
+        │  GNU Radio scheduler, complex64 stream
+        ▼
+*any* GNU Radio flowgraph  (Spectre is just one consumer)
+```
+
+Spectre is the proxy test, but the link being exercised
+(`firmware → libsddc → Soapy → GNU Radio Source`) is exactly the
+same link every other GNU-Radio-based RX888 consumer uses:
+hand-rolled GRC flowgraphs, `gqrx` (when built with Soapy),
+`urh`, `gr-satellites`, custom research code, etc.  None of those
+need any RX888-specific code on their side — they ask SoapySDR for
+`driver=SDDC` and the firmware does the rest.
+
+**Consequence**: once this container produces the expected plot,
+the project can credibly state in `README.md` / `docs/compatibility.md`
+that the firmware is compatible with the **GNU Radio ecosystem via
+SoapySDR-SDDC**, not merely with Spectre.  Documenting that
+explicitly is itself a deliverable of this branch (see Task 5b
+below).
+
 ## Deliverables
 
 ```
@@ -182,7 +216,29 @@ below is exactly the experiment that decides this.
       to patch.
     - Initially: just the recon findings from task 1.
 
-7. **CI integration** *(out of scope for this branch; capture as a
+7. **Update `docs/compatibility.md` and `README.md` (Task 5b — the
+   GNU Radio claim)**
+    - Add a new "## Spectre" section to `docs/compatibility.md`
+      paralleling the existing "## ka9q-radio" section, pointing
+      at `docker/spectre/` and `docs/spectre-compat-audit.md`.
+    - Add a new "## SoapySDR-SDDC + GNU Radio" section to
+      `docs/compatibility.md` immediately after it, framing the
+      Spectre container as the *validation harness* for a broader
+      compatibility claim: any Soapy-aware GNU Radio host
+      (`driver=SDDC`) can consume this firmware without
+      RX888-specific code on its side.  Be precise about what is
+      and is not validated — we only run one flowgraph (Spectre's
+      fixed_center_frequency mode), so the claim is "validated on
+      the SoapySDR-SDDC seam, not on every block downstream of it".
+      Reference the diagram from PLAN_SPECTRE_DOCKER.md inline.
+    - Add the same hosts to the bullet list in the top-level
+      `README.md`'s "Compatible host applications" section.
+    - Do NOT make this claim until the validation test in Task 5
+      has actually been run on real hardware and produced the
+      expected plot — these doc edits are *gated* on a green run
+      and should ride a later commit on the same branch.
+
+8. **CI integration** *(out of scope for this branch; capture as a
    follow-up issue)*
     - The ka9q docker test is host-attached (requires real hardware)
       and is not in CI. Spectre will be the same.
