@@ -22,8 +22,8 @@
  * Adding a new failure-mode detection means adding a new event type
  * and a new evaluation branch — NOT writing a new watchdog.
  *
- * See PLAN_RECOVERY.md at the repo root for full design notes and the
- * recovery cascade table.
+ * See docs/archive/PLAN_RECOVERY.md for the original design notes
+ * and recovery cascade table.
  */
 
 #ifndef _INCLUDED_HEALTH_H_
@@ -48,7 +48,8 @@ typedef enum {
 
 /* One-time initialization.  Called once at firmware boot before any
  * other health_*() function.  Configures the FX3 hardware watchdog
- * timer (Level 5 catastrophic backstop) — see PLAN_RECOVERY.md §4. */
+ * timer (Level 5 catastrophic backstop) — see
+ * docs/archive/PLAN_RECOVERY.md §4. */
 void health_init(void);
 
 /* HWDT pet is handled internally by a ThreadX timer set up in

@@ -116,8 +116,8 @@ Recovery is owned by a single module — `SDDC_FX3/health.c` — that
 collects liveness signals from across the firmware and applies a
 documented cascade of remedies when the device is unhealthy.  This
 section describes the architecture and the implementation status of
-each cascade level.  See `PLAN_RECOVERY.md` at the repo root for the
-design rationale and PR sequencing.
+each cascade level.  See `docs/archive/PLAN_RECOVERY.md` for the
+original design rationale and PR sequencing.
 
 ### Health interface
 
@@ -145,7 +145,7 @@ a new evaluation branch — not writing a new watchdog.
 
 | Level | Remedy | Appropriate for | Latency | Status |
 |---|---|---|---|---|
-| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` per `PLAN_RECOVERY.md` §5 PR N) |
+| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` — issue #115) |
 | 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
 | 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
 | 4 | `CyU3PDeviceReset(CyFalse)` | Vendor-handler hang (EP0 thread deadlocked in an SDK call) | full re-enumeration (~1-2 s) | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` (#104, #105).  Validated end-to-end by `test_health_recovery` (HANGFX3). |

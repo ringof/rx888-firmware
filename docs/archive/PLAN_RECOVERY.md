@@ -1,5 +1,13 @@
 # Plan: Recovery Architecture via `health.c`
 
+> **Status: archived.**  The cascade described here shipped in PR #112
+> (Levels 1, 4, 5).  This document is preserved for design rationale —
+> see `README.md` §"Firmware Robustness" for the canonical current
+> description of the implemented cascade.  The one remaining item — §5
+> "PR N (deferred)", migrating the existing streaming watchdog from
+> `RunApplication.c` into `health_recover(WEDGED_STREAMING)` — is now
+> tracked as issue #115.
+
 ## 1. Context and motivation
 
 The 1-hour soak on `main` produced one transient `rapid_start_stop` failure

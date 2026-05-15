@@ -9,7 +9,7 @@
  * and Levels 1-4 (which all depend on the main thread to fire) become
  * unreachable.  Health.c is the only place HWDT is configured/petted.
  *
- * See health.h for the contract and PLAN_RECOVERY.md for design notes.
+ * See health.h for the contract and docs/archive/PLAN_RECOVERY.md for design notes.
  *
  * The discipline rule: new recovery code MUST extend one of these
  * functions.  Do not invent parallel mechanisms.  Do not add inline
@@ -174,7 +174,7 @@ health_status_t health_evaluate(void)
 
 void health_recover(health_status_t status)
 {
-    /* See PLAN_RECOVERY.md §4 for the documented cascade levels.
+    /* See docs/archive/PLAN_RECOVERY.md §4 for the documented cascade levels.
      * PR 2 implements Level 4 only.  Future PRs add Levels 2, 3, 5
      * and migrate Level 1 (streaming watchdog). */
     switch (status) {
