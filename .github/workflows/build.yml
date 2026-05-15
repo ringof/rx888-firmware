@@ -1,8 +1,34 @@
 name: build
 
+# Skip the firmware/host build when a push or PR touches only
+# documentation-class files.  The Pages workflow (pages.yml) handles
+# docs/README rebuilds separately; running the firmware build for a
+# Markdown-only change wastes ~2 minutes of runner time per PR.
+#
+# GitHub treats `paths-ignore` as "skip iff EVERY changed path
+# matches" -- a PR that mixes docs and code still runs the build.
+#
+# If `build / firmware` or `build / host-tests` is a required status
+# check in branch protection, a docs-only PR may stall waiting for a
+# check that no longer runs.  Adjust the rule (or add a stub job
+# with the inverse path filter) in that case.
 on:
   push:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'SDDC_FX3/docs/**'
+      - '.github/PULL_REQUEST_TEMPLATE/**'
+      - 'LICENSE*'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'SDDC_FX3/docs/**'
+      - '.github/PULL_REQUEST_TEMPLATE/**'
+      - 'LICENSE*'
+      - '.gitignore'
 
 jobs:
   firmware:
