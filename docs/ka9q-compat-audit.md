@@ -2,6 +2,7 @@
 title: ka9q-radio compat audit
 nav_order: 10
 permalink: /ka9q-compat-audit/
+description: Static audit of ka9q-radio against the RX888mk2 FX3 firmware - vendor-command compatibility, STARTADC/STARTFX3 ordering (fixed in v0.1.0), VHF/HF coverage.
 ---
 
 # ka9q-radio ↔ SDDC_FX3 Compatibility Audit

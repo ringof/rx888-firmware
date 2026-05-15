@@ -2,6 +2,7 @@
 title: Wedge detection
 nav_order: 8
 permalink: /wedge_detection/
+description: Detecting and recovering from FX3 DMA wedges caused by Si5351 PLL unlock or clock loss mid-stream - PIB callbacks, DMA count polling, pre-flight checks.
 ---
 
 # GPIF Clock Loss Detection and Wedge Recovery

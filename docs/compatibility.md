@@ -2,6 +2,7 @@
 title: Host application compatibility
 nav_order: 4
 permalink: /compatibility/
+description: Host application compatibility for the RX888mk2 firmware - ka9q-radio (Docker container), rx888_tools / rx888_stream, ExtIO-based Windows hosts.
 ---
 
 # Host application compatibility

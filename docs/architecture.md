@@ -2,6 +2,7 @@
 title: Architecture
 nav_order: 5
 permalink: /architecture/
+description: RX888mk2 FX3 firmware architecture - hardware overview, GPIF II, DMA pipeline, ThreadX RTOS, vendor commands, recovery cascade, Si5351 clock, debug paths.
 ---
 
 # RX888mk2 Firmware Architecture

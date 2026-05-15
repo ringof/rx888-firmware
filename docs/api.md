@@ -2,6 +2,7 @@
 title: USB API reference
 nav_order: 2
 permalink: /api/
+description: Complete USB vendor-command protocol for the RX888mk2 FX3 firmware - STARTFX3, STOPFX3, GETSTATS 26-byte layout, SETARGFX3, GPIO bitmap, Si5351 I2C.
 ---
 
 # USB API reference

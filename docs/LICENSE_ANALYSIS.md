@@ -2,6 +2,7 @@
 title: License analysis
 nav_order: 11
 permalink: /LICENSE_ANALYSIS/
+description: License analysis of the RX888mk2 FX3 firmware - MIT application code, proprietary Cypress FX3 SDK / ThreadX RTOS, why the GPL R82xx driver was removed.
 ---
 
 # License Analysis

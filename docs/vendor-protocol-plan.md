@@ -2,6 +2,7 @@
 title: Vendor protocol plan
 nav_order: 9
 permalink: /vendor-protocol-plan/
+description: Plan for the next-generation FX3 vendor-command protocol on the RX888mk2 - GETCAPABILITIES, GETSTATE, separation of concerns, recoverability invariant.
 ---
 
 # Vendor Protocol Evolution Plan

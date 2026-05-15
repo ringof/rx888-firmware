@@ -2,6 +2,7 @@
 title: GPIF & Recovery
 nav_order: 6
 permalink: /gpif-and-recovery/
+description: Cypress FX3 GPIF II state machine for the RX888mk2 - states, transitions, soft-stop via FW_TRG deassert, force-stop fallback, streaming-wedge watchdog.
 ---
 
 # GPIF State Machine and Recovery

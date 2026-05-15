@@ -2,6 +2,7 @@
 title: Diagnostics side-channel
 nav_order: 7
 permalink: /diagnostics_side_channel/
+description: GETSTATS (0xB3) - a 26-byte EP0 vendor request that exposes FX3 firmware counters - DMA progress, GPIF state, PIB errors, Si5351 PLL/CLK0, boot count.
 ---
 
 # Firmware-Side Diagnostics for Host Streamer Software

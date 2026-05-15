@@ -2,6 +2,7 @@
 title: Home
 layout: home
 nav_order: 1
+description: Open-source Cypress FX3 USB controller firmware for the RX888 mk2 direct-sampling SDR.  Vendor-command protocol, GPIF state machine, ka9q-radio compatibility.
 ---
 
 # RX888mk2 Firmware
