@@ -55,6 +55,7 @@ Concretely, the firmware must guarantee:
 - Malformed payloads (wrong length, out-of-range values) are rejected at the EP0 boundary; they do not corrupt internal state.
 - The escape hatches `RESETFX3` and `STOPFX3` always work, including from a wedged GPIF state.
 - Host-side `libusb_reset_device()` — and ultimately a USB unplug/replug — always brings the device back to bootloader (`04b4:00f3`) or to the loaded baseline (`04b4:00f1` with idle GPIF).
+- **Unknown-opcode contract (feature-detection guarantee).**  Any vendor request byte not currently implemented must STALL cleanly without advancing any internal state.  Clients (e.g. `librx888`) may probe-then-issue to detect optional commands without risking a wedge.  Validated by the soak/fuzz harness, which deliberately injects unallocated opcodes (`0xFF` today; reserved-range bytes once commit 3 lands).
 
 This principle binds **every** firmware change in this plan.  Each commit must include a soak/fuzz test (or pointer to one) demonstrating that the change does not create a new wedge mode.
 
@@ -123,7 +124,7 @@ Each commit is independently mergeable.  Order matters only for documentation cr
 - `GETCAPABILITIES` (0xBB) — returns a JSON object describing firmware version, build SHA, supported-commands list, sample-rate min/max, GPIO bit map (so the LED ambiguity in audit §4 becomes queryable), ADC bit width.  JSON keeps the schema flexible — fields can be added without breaking parsers.  Example:
 
   ```json
-  {"version":"0.0.1","build":"f78cff9","commands":["STARTFX3","STOPFX3","STARTADC","GPIOFX3","I2CWFX3","I2CRFX3","SETARGFX3","RESETFX3","READINFODEBUG","GETSTATS","GETCAPABILITIES","GETSTATE"],"sample_rate_hz":{"min":2000000,"max":129600000},"gpio_bits":{"DITHER":0,"RANDOM":1,"VHF_EN":2,"LED_BLUE":11},"adc_bits":16}
+  {"schema_version":1,"version":"0.0.1","build":"f78cff9","commands":["STARTFX3","STOPFX3","STARTADC","GPIOFX3","I2CWFX3","I2CRFX3","SETARGFX3","RESETFX3","READINFODEBUG","GETSTATS","GETCAPABILITIES","GETSTATE"],"sample_rate_hz":{"min":2000000,"max":129600000},"gpio_bits":{"DITHER":0,"RANDOM":1,"VHF_EN":2,"LED_BLUE":11},"adc_bits":16}
   ```
 
   Returned over EP0 in chunks if it exceeds `CYFX_SDRAPP_MAX_EP0LEN`; host issues repeat reads until done.  Length capped (e.g. 1024 bytes) so this never wedges.
@@ -131,10 +132,20 @@ Each commit is independently mergeable.  Order matters only for documentation cr
 - `GETSTATE` (0xBC) — returns a smaller JSON object with current SM state, current Si5351 frequency (read from chip), current GPIO bits, last vendor-command error code:
 
   ```json
-  {"sm_state":"IDLE","si5351_clk0_hz":64800000,"gpio":3,"last_error":0,"streaming":false}
+  {"schema_version":1,"sm_state":"IDLE","si5351_clk0_hz":64800000,"gpio":3,"last_error":0,"streaming":false}
   ```
 
 **Why JSON over fixed binary:** schema flexibility (new fields don't break old hosts), introspection by hand (`curl`-style debugging via `usbcontrol` or similar), easier integration with web-based tooling (ka9q-web, future telemetry).  Cost is parser size — small in C with a string-matching scanner, and the firmware only needs to *emit*, not parse.
+
+**Future compatibility (librx888 and other downstream clients).**  The following invariants are guarantees, not coincidences, and must be preserved as new commands and fields are added:
+
+- **`schema_version` is the negotiation hatch.**  Major-version bumps signal a breaking change (field removed, type changed, semantics altered).  Minor-version bumps signal additive growth and must not break clients that ignore unknown fields.  Today both `GETCAPABILITIES` and `GETSTATE` ship at `"schema_version": 1`.
+- **JSON growth contract.**  Future firmware revisions may *add* fields to either response; clients must ignore unknown fields rather than rejecting the document.  Removing a field, or changing its type or semantics, requires a major-version bump.
+- **`commands` is the feature-detection surface.**  The string array must enumerate every vendor command the firmware will accept.  Any future opcode added to the firmware must be appended to this list in the same revision; existing entries are stable.  Clients perform feature detection by string lookup rather than by hardcoded opcode tables.
+- **Opcode reservations.**  To leave room for the typed-setter expansion that downstream clients (e.g. `librx888`) will need without colliding with one-off additions, the following ranges are reserved:
+  - **`0xD0–0xDF` — typed configuration setters.**  Reserved for future single-concern, typed-argument setters (e.g. `SET_SAMPRATE`, `SET_RF_ATTEN`).  Do not allocate these bytes for ad-hoc additions; pull from `0xB7–0xB9` or `0xBD–0xCD` instead.
+  - **`0xE0–0xEF` — typed query expansion.**  Reserved for future structured query commands beyond `GETCAPABILITIES`/`GETSTATE`.
+  - These reservations are advisory only; no firmware code today enforces them.  A future commit may add an enum range guard.
 
 **Recoverability check:** both commands are read-only.  Truncated reads or aborted transfers leave the firmware in EP0 idle.  Bounded length cap means no buffer-overflow surface.
 
@@ -266,6 +277,7 @@ static int build_capabilities_json(char *buf, int max)
 {
     return snprintf(buf, max,
         "{"
+          "\"schema_version\":1,"
           "\"version\":\"%s\","
           "\"build\":\"%s\","
           "\"commands\":[\"STARTFX3\",\"STOPFX3\",\"STARTADC\",\"GPIOFX3\","
