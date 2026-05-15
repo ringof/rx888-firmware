@@ -20,16 +20,17 @@ build succeeds with zero patches applied.
 The audit (`docs/ka9q-compat-audit.md`) identified two further
 ka9q-side behaviors that are observable but not blocking:
 
-- **`sleep(1)` after firmware upload** (`rx888.c:700`).  Upstream's
-  fixed 1 s wait is fragile in principle, but it is sufficient on
-  every host we have tested when the container is run with
-  `-v /run/udev:/run/udev:ro` (so libusb's hotplug listener sees
+- **`sleep(1)` after firmware upload** in ka9q's `rx888_usb_init()`.
+  Upstream's fixed 1 s wait is fragile in principle, but it is
+  sufficient on every host we have tested when the container is run
+  with `-v /run/udev:/run/udev:ro` (so libusb's hotplug listener sees
   fresh device events).  A polling loop would be more robust on
   pathologically slow hosts but is not required.  Documented in
   audit §1.
 
-- **`TUNERSTDBY` (0xB8) on the HF path** (`rx888.c:943`,
-  `rx888.c:1003`).  Returns a clean USB STALL from SDDC firmware's
-  default handler; ka9q's `command_send` ignores the return value,
-  so streaming is unaffected.  Cosmetic only — the bus is noisier
-  than it needs to be.  Documented in audit §2.
+- **`TUNERSTDBY` (0xB8) on the HF path** in ka9q's
+  `rx888_set_hf_mode()` and `rx888_start_rx()`.  Returns a clean USB
+  STALL from SDDC firmware's default handler; ka9q's `command_send`
+  ignores the return value, so streaming is unaffected.  Cosmetic
+  only — the bus is noisier than it needs to be.  Documented in
+  audit §2.

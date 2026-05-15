@@ -45,7 +45,7 @@ function so the analysis stays valid across line shifts.
 |---|---|---|---|
 | STARTFX3 | 0xAA | ✅ | |
 | STOPFX3 | 0xAB | ✅ | |
-| TESTFX3 | 0xAC | ✅ | |
+| TESTFX3 | 0xAC | ✅ | Defined in `rx888.h` but never sent by ka9q — see §9. |
 | GPIOFX3 | 0xAD | ✅ | LED bit positions differ — see §4. |
 | I2CWFX3 | 0xAE | ✅ | |
 | I2CRFX3 | 0xAF | ✅ | |
@@ -218,6 +218,21 @@ through commit `13b2091`, at which point the firmware-side fix in
 The disabled patch file remains in-tree as
 `03-startadc-before-startfx3.patch.disabled` for archaeology; see
 `docker/ka9q-radio/patches/README.md`.
+
+### 9. TESTFX3 (0xAC) defined but not exercised *(no host coordination needed)*
+
+ka9q's `rx888.h` defines `TESTFX3 = 0xAC` in the `FX3Command` enum,
+but `rx888.c` contains zero occurrences of `TESTFX3`, `0xAC`, or
+the word "version".  The plugin never issues the `TESTFX3` request,
+never reads the device's model/version word, and has no version
+comparison logic.
+
+Implication: SDDC firmware's `FIRMWARE_VER_MAJOR` /
+`FIRMWARE_VER_MINOR` can change between firmware releases (e.g. the
+v0.1.0 bump from 2.2 to 2.3) without any host-side coordination
+from ka9q.  The compatibility-matrix row for `TESTFX3` above
+reflects that it is *supported* by the firmware (returns a 4-byte
+response), not that it is *sent* by ka9q.
 
 ## Container-side requirements (no patches needed)
 
