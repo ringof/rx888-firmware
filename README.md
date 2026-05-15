@@ -5,10 +5,14 @@
 
 **Documentation:** [ringof.github.io/rx888-firmware](https://ringof.github.io/rx888-firmware/) — USB API reference, GPIO map, host-application compatibility, and architecture notes.
 
-Cypress FX3 USB controller firmware for the **RX888 mk2** (also written
-RX888mk2) direct-sampling SDR receiver. HF reception (0–32 MHz) via the
-on-board LTC2208 ADC; the R828D VHF tuner is detected but not driven by
-the firmware (see Limitations).
+Open-source Cypress FX3 firmware for the **RX888 mk2** (also written
+RX888mk2) direct-sampling SDR receiver.  If you're about to write FX3
+firmware for an SDR — USB vendor-command protocol, GPIF II state
+machine, DMA pipeline, Si5351 clock control, ka9q-radio compatibility,
+recovery cascade with streaming watchdog and FX3 hardware-watchdog
+backstop — start here, not from scratch.  HF reception 0–32 MHz via
+the on-board LTC2208 ADC; the R828D VHF tuner is detected but not
+driven by the firmware (see Limitations).
 
 ## Compatible host applications
 
