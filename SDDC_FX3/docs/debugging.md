@@ -350,12 +350,14 @@ Read-only EP0 vendor request (IN direction):
 bRequest = 0xB3 (GETSTATS)
 wValue   = 0
 wIndex   = 0
-wLength  = 20
+wLength  = 26    (firmware sends exactly 26 bytes; host may request
+                  fewer and the firmware will truncate to the
+                  requested length)
 ```
 
 ### Response Layout
 
-20 bytes, packed, little-endian (native ARM byte order):
+26 bytes, packed, little-endian (native ARM byte order):
 
 | Offset | Size | Field | Source |
 |--------|------|-------|--------|
@@ -364,8 +366,11 @@ wLength  = 20
 | 5--8 | 4 | PIB error count | `glCounter[0]`, incremented in `PibErrorCallback` |
 | 9--10 | 2 | Last PIB error arg | `glLastPibArg`, saved in `PibErrorCallback` |
 | 11--14 | 4 | I2C failure count | `glCounter[1]`, incremented in `I2cTransfer` on error |
-| 15--18 | 4 | Watchdog recovery count | `glCounter[2]`, incremented by GPIF watchdog on each recovery (see section 5) |
+| 15--18 | 4 | Streaming fault count | `glCounter[2]`, incremented by GPIF watchdog on each recovery + on EP underruns (see section 5) |
 | 19 | 1 | Si5351 status (reg 0) | `I2cTransfer(0x00, 0xC0, …)` sampled at read time |
+| 20--23 | 4 | `boot_count` | `health_boot_count()`; increments once per `health_init()`.  Use to detect mid-test resets (Level 4 `CyU3PDeviceReset`, Level 5 HWDT, manual `RESETFX3`, or power cycle): snapshot before, compare after, mismatch means the device reset. |
+| 24 | 1 | Si5351 CLK0_CONTROL (reg 16) | Live `I2cTransfer(0x10, 0xC0, …)`.  Bit 7 is `CLK0_PDN`: set means CLK0 is powered down, clear means CLK0 is enabled.  Returns `0xFF` if the I2C read fails. |
+| 25 | 1 | `clk0_result` | `si5351_clk0_enabled()` (1 = CLK0 enabled, 0 = disabled or I2C error).  Same value `GpifPreflightCheck()` consults at `STARTFX3` time. |
 
 ### Counter Behavior
 
@@ -521,7 +526,7 @@ Runs 36 tests (39 with streaming) in TAP format:
 | 19 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
 | 20 | Debug console over USB | `?` command returns help text (issue #26) |
 | 21 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 22 | GETSTATS readout | GETSTATS (0xB3) returns 20 bytes with sane values |
+| 22 | GETSTATS readout | GETSTATS (0xB3) returns 26 bytes with sane values |
 | 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
 | 24 | GETSTATS PLL status | Si5351 PLL A locked, SYS_INIT clear |
 | 25 | GPIF stop state | GPIF SM state is 0, 1, or 255 after STOPFX3 (not stuck in read) |

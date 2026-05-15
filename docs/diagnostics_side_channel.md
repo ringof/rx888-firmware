@@ -9,10 +9,12 @@ permalink: /diagnostics_side_channel/
 > **Status: Partially implemented.**
 >
 > The core diagnostic side-channel is live as **GETSTATS (`0xB3`)**, a
-> 20-byte EP0 vendor request returning DMA counts, GPIF state, PIB
-> error counts, I2C failure counts, streaming fault counts, and Si5351 PLL status.  See
-> [`SDDC_FX3/docs/debugging.md` §5](../SDDC_FX3/docs/debugging.md) for
-> the implemented wire format and host usage.
+> 26-byte EP0 vendor request returning DMA counts, GPIF state, PIB
+> error counts, I2C failure counts, streaming-fault counts, Si5351
+> PLL status, boot count, and Si5351 CLK0 power-state diagnostics.
+> See [`api.md` §GETSTATS](api.md) for the canonical wire format and
+> [`SDDC_FX3/docs/debugging.md` §6](../SDDC_FX3/docs/debugging.md)
+> for host-side usage examples.
 >
 > The extended `DIAGFX3` (`0xB7`) command and the 24-byte `fx3_diag_t`
 > structure described in §§ "Future extensions" below remain **design
@@ -76,6 +78,9 @@ and alignment ambiguity on the ARM926EJ-S target.
 | 11--14 | 4    | I2C failure count      | *(not in proposal)* | **Implemented** (bonus diagnostic) |
 | 15--18 | 4    | Streaming fault count  | `streaming_faults` | **Implemented** (EP underruns + watchdog recoveries) |
 | 19     | 1    | Si5351 status (reg 0)  | `si5351_status`   | **Implemented** |
+| 20--23 | 4    | `boot_count`           | *(not in proposal)* | **Implemented** (per-boot counter for mid-test reset detection) |
+| 24     | 1    | Si5351 CLK0_CONTROL (reg 16) | *(not in proposal)* | **Implemented** (live read; bit 7 = CLK0_PDN) |
+| 25     | 1    | `clk0_result`          | *(not in proposal)* | **Implemented** (`si5351_clk0_enabled()`; same value `GpifPreflightCheck()` consults) |
 
 **Not yet implemented** from the original proposal:
 
@@ -146,13 +151,15 @@ count) as a superset.
 
 ### Chosen: New vendor command via EP0 (Option A)
 
-**Implemented as GETSTATS (`0xB3`), 20 bytes.**  This follows Option A
+**Implemented as GETSTATS (`0xB3`), 26 bytes.**  This follows Option A
 from the original proposal — a dedicated vendor request returning
 diagnostic counters via EP0, independent of the bulk data stream.
 
 ```
-Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=20, direction=IN
-FX3 returns: 20 bytes, packed little-endian (see debugging.md §5 for layout)
+Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=26, direction=IN
+FX3 returns: 26 bytes, packed little-endian (see api.md §GETSTATS for
+             the canonical layout, or SDDC_FX3/docs/debugging.md §6
+             for the firmware-side view)
 ```
 
 The host calls this periodically (every 100-500 ms) alongside its
@@ -408,7 +415,7 @@ int ret = libusb_control_transfer(dev,
 **Actual cost (GETSTATS, implemented):**
 - Handler runs inline in the EP0 callback — one `CyU3PGpifGetSMState()`
   call, three `memcpy` operations, and one I2C register read (~50 µs)
-- 20-byte EP0 response per poll; at 10 polls/sec: 200 bytes/sec
+- 26-byte EP0 response per poll; at 10 polls/sec: 260 bytes/sec
 - Counters reuse the existing `glCounter[20]` array — zero additional BSS
 
 **Projected cost (DIAGFX3 extension, if implemented):**
