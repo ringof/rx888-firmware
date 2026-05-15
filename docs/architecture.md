@@ -219,9 +219,9 @@ The firmware controls the GPIF via a software input signal
 
 The application thread monitors `glDMACount` every 100 ms while
 streaming is active.  If the count stalls for 3 consecutive polls
-(300 ms) with the SM in a BUSY/WAIT state (5, 7, 8, 9), the watchdog
-tears down and rebuilds the pipeline -- same sequence as STOP + START
-but initiated automatically.  If the PLL has lost lock, the watchdog
+(300 ms) with the SM in a BUSY/WAIT state, the watchdog tears down
+and rebuilds the pipeline -- same sequence as STOP + START but
+initiated automatically.  If the PLL has lost lock, the watchdog
 leaves the pipeline stopped and waits for the host to reconfigure.
 Each recovery increments `glCounter[2]` (visible via `GETSTATS`).
 
@@ -238,7 +238,22 @@ on all active states that can stall, enabling clean soft-stop without
 DMA debris.  STOPFX3 and the watchdog deassert FW_TRG, verify the SM
 reached IDLE, then disable — falling back to force-stop only if the
 external clock is dead.  See [gpif-and-recovery.md](gpif-and-recovery.md)
-for the full state machine design and recovery architecture.
+for the full state machine design and GPIF-level recovery details.
+
+**Wider recovery cascade:**
+
+The GPIF watchdog is one level of a broader recovery cascade.  The
+firmware also detects EP0 vendor-handler hangs (Level 4, in
+`SDDC_FX3/health.c`) and main-thread death via the FX3 hardware
+watchdog (Level 5, configured in `health.c` and petted by a
+heartbeat-gated ThreadX timer).  Test-only vendor commands `HANGFX3`
+(0xCE) and `HANGMAIN` (0xCF) force each failure mode for round-trip
+validation.  A `boot_count` value in `GETSTATS` lets a host detect
+that the device reset between two snapshots regardless of cause.
+
+The cascade is canonically documented in the
+[README "Firmware Robustness" section](https://github.com/ringof/rx888-firmware#firmware-robustness).
+See `docs/archive/PLAN_RECOVERY.md` for the original design rationale.
 
 ---
 
@@ -521,17 +536,19 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 
 | bRequest | Name | Dir | wValue | wIndex | Data | Description |
 |----------|------|-----|--------|--------|------|-------------|
-| 0xAA | STARTFX3 | OUT | -- | -- | 4 B | Start GPIF streaming; preflight-checks PLL lock, force-stops any stuck SM, resets DMA, reloads waveform, asserts FW_TRG; STALLs if PLL unlocked |
-| 0xAB | STOPFX3 | OUT | -- | -- | 4 B | Stop GPIF streaming; de-asserts FW_TRG, force-disables GPIF (no waveform reload), resets DMA, flushes EP1 |
+| 0xAA | STARTFX3 | OUT | -- | -- | 0 B | Start GPIF streaming; preflight-checks PLL lock, force-stops any stuck SM, resets DMA, reloads waveform, asserts FW_TRG; STALLs if PLL unlocked |
+| 0xAB | STOPFX3 | OUT | -- | -- | 0 B | Stop GPIF streaming; de-asserts FW_TRG, soft-disables GPIF (force-stop fallback if SM did not reach IDLE), resets DMA, flushes EP1 |
 | 0xAC | TESTFX3 | IN | debug | -- | 4 B | Query device info; returns [glHWconfig, FW_major, FW_minor, glVendorRqtCnt]; wValue=1 enables debug mode |
 | 0xAD | GPIOFX3 | OUT | -- | -- | 4 B | Set GPIO state; payload is a 32-bit bitmask interpreted by `rx888r2_GpioSet()` |
 | 0xAE | I2CWFX3 | OUT | I2C addr | reg addr | N B | Write N bytes to I2C device at wValue, register wIndex |
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
-| 0xB1 | RESETFX3 | OUT | -- | -- | 4 B | Warm-reset the FX3; device disconnects and returns to bootloader |
+| 0xB1 | RESETFX3 | OUT | -- | -- | 0 B | Warm-reset the FX3; device disconnects and returns to bootloader |
 | 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
 | 0xB3 | GETSTATS | IN | 0 | 0 | 26 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1).  See [api.md §GETSTATS](api.md) for the canonical layout. |
-| 0xB6 | SETARGFX3 | OUT | value | arg_id | 1 B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255) |
-| 0xBA | READINFODEBUG | IN | char | -- | 100 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
+| 0xB6 | SETARGFX3 | OUT | value | arg_id | N B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255), arg_id 14 = `WDG_MAX_RECOV` watchdog recovery cap |
+| 0xBA | READINFODEBUG | IN | char | -- | ≤ 64 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
+| 0xCE | HANGFX3 | OUT | sleep ms | -- | 0 B | **Test-only.** Sleeps `wValue` ms inside the EP0 handler to deterministically wedge the vendor callback; used by `test_health_recovery` to validate the Level-4 EP0 watchdog. |
+| 0xCF | HANGMAIN | OUT | -- | -- | 0 B | **Test-only.** Sets a flag that causes the main loop to spin forever on its next iteration; used by `test_main_recovery` to validate the Level-5 FX3 HWDT backstop. |
 
 ### EP0 buffer overflow protection
 
@@ -641,8 +658,11 @@ When the host sends `STARTADC` with a target frequency:
 
 Each I2C step checks the return status; if any step fails the command
 STALLs EP0 and the failure is logged via `DebugPrint`.  On success the
-firmware sleeps 1000 ms after programming the clock to allow the PLL
-to settle.  A frequency of 0 disables CLK0 output (single I2C write).
+firmware polls `si5351_pll_locked()` (Si5351 register 0 bit 5) for up
+to ~100 ms, returning as soon as PLL A reports lock — this keeps the
+EP0 thread unblocked so a `STARTFX3` arriving shortly after a frequency
+change is not delayed by the worst-case settle time.  A frequency of 0
+disables CLK0 output (single I2C write).
 
 ---
 
@@ -799,22 +819,24 @@ every vendor command through `fx3_cmd`.
 
 ## Source file reference
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `SDDC_FX3/StartUp.c` | 82 | ARM entry point, clock config, I/O matrix, RTOS start |
-| `SDDC_FX3/RunApplication.c` | 362 | Application thread, hardware detection, main loop, GPIF watchdog |
-| `SDDC_FX3/USBHandler.c` | 574 | USB setup callback (all vendor commands), USB init |
-| `SDDC_FX3/StartStopApplication.c` | 212 | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
-| `SDDC_FX3/DebugConsole.c` | 349 | UART init, debug buffer, console parser, USB debug |
-| `SDDC_FX3/USBDescriptor.c` | 299 | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
-| `SDDC_FX3/Support.c` | 185 | Error code lookup, status checking, error LED blink |
-| `SDDC_FX3/i2cmodule.c` | 90 | I2C master init and transfer functions |
-| `SDDC_FX3/driver/Si5351.c` | 328 | Si5351 clock synthesizer: PLL setup, frequency calculation, lock status |
-| `SDDC_FX3/radio/rx888r2.c` | 89 | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
-| `SDDC_FX3/Application.h` | 96 | Central header: includes, defines, prototypes |
-| `SDDC_FX3/protocol.h` | 84 | USB protocol: vendor request codes, GPIO enums, arguments |
-| `SDDC_FX3/SDDC_GPIF.h` | 173 | Generated GPIF II state machine configuration |
-| `SDDC_FX3/cyfxtx.c` | -- | Cypress SDK memory and TX runtime support |
-| `SDDC_FX3/cyfx_gcc_startup.S` | -- | ARM GCC startup assembly (vectors, stack init) |
-| `tests/fx3_cmd.c` | 4990 | Host-side vendor command exerciser, soak test harness (libusb) |
+| File | Purpose |
+|------|---------|
+| `SDDC_FX3/StartUp.c` | ARM entry point, clock config, I/O matrix, RTOS start |
+| `SDDC_FX3/RunApplication.c` | Application thread, hardware detection, main loop, GPIF streaming watchdog, recovery cascade integration |
+| `SDDC_FX3/USBHandler.c` | USB setup callback (all vendor commands), USB init, EP0 liveness reporting into `health.c` |
+| `SDDC_FX3/StartStopApplication.c` | GPIF/DMA/endpoint configuration, start/stop streaming, preflight check |
+| `SDDC_FX3/DebugConsole.c` | UART init, debug buffer, console parser, USB debug |
+| `SDDC_FX3/USBDescriptor.c` | USB descriptors (SS, HS, FS, BOS, strings, serial number) |
+| `SDDC_FX3/Support.c` | Error code lookup, status checking, error LED blink |
+| `SDDC_FX3/i2cmodule.c` | I2C master init and transfer functions |
+| `SDDC_FX3/health.c` | Recovery cascade owner: EP0 vendor-handler liveness check (Level 4 device reset) and FX3 hardware watchdog configuration / petting (Level 5).  `boot_count` source. |
+| `SDDC_FX3/health.h` | Recovery cascade interface (three-function contract: `health_record_event`, `health_evaluate`, `health_recover`) |
+| `SDDC_FX3/driver/Si5351.c` | Si5351 clock synthesizer: PLL setup, frequency calculation, lock status, CLK0 chip query |
+| `SDDC_FX3/radio/rx888r2.c` | RX888mk2 hardware abstraction: GPIO, attenuator, VGA |
+| `SDDC_FX3/Application.h` | Central header: includes, defines, prototypes |
+| `SDDC_FX3/protocol.h` | USB protocol: vendor request codes, GPIO enums, arguments |
+| `SDDC_FX3/SDDC_GPIF.h` | Generated GPIF II state machine configuration |
+| `SDDC_FX3/cyfxtx.c` | Cypress SDK memory and TX runtime support |
+| `SDDC_FX3/cyfx_gcc_startup.S` | ARM GCC startup assembly (vectors, stack init) |
+| `tests/fx3_cmd.c` | Host-side vendor command exerciser, soak test harness (libusb) |
 | `tests/fw_test.sh` | 731 | TAP test harness for automated firmware testing (36 tests + 3 streaming) |
