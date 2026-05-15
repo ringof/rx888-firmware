@@ -35,3 +35,9 @@ plugins:
   - jekyll-remote-theme
   - jekyll-seo-tag
   - jekyll-sitemap
+
+# Search-engine site ownership verification.  Each entry is emitted
+# by jekyll-seo-tag as a <meta> tag in <head>.  Google verification
+# is handled at the root domain (DNS-level), so no key is needed here.
+webmaster_verifications:
+  bing: 3804FF063F01EBF3145B8D4D3EF09208
