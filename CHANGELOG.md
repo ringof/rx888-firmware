@@ -84,7 +84,3 @@ First named release.  Firmware version **2.3** (`FIRMWARE_VER_MAJOR=2`,
   ([#113](https://github.com/ringof/rx888-firmware/issues/113)).
 - Broader doc audit pending
   ([#114](https://github.com/ringof/rx888-firmware/issues/114)).
-
-## [0.1.0-rc0]
-
-Pre-release.  See git history for details.

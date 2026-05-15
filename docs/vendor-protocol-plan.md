@@ -6,9 +6,15 @@ permalink: /vendor-protocol-plan/
 
 # Vendor Protocol Evolution Plan
 
-**Status:** approved for execution
-**Branch:** TBD (likely a successor to `claude/fix-docker-build-path-qLngV` once #91 is merged)
-**Trigger:** ka9q-radio Docker test harness surfaced a hidden coupling between `STARTADC` and `STARTFX3` (audit §8).  Fixing only the bug misses the larger lesson; this plan addresses both.
+**Status as of v0.1.0:** Commits 1 and 2 shipped (firmware Si5351
+chip-query and the docker patch-03 retirement, both via PR #122).
+Commits 3 and 4 — `GETCAPABILITIES` / `GETSTATE` vendor commands and
+the recommended-sequence documentation — remain unwritten.  The plan
+text below is preserved as the design rationale for the remaining
+work; the Commit 1 and Commit 2 subsections are marked **DONE
+(v0.1.0)** with shipping-commit pointers.
+
+**Trigger:** ka9q-radio Docker test harness surfaced a hidden coupling between `STARTADC` and `STARTFX3` (audit §8).  Fixing only the bug missed the larger lesson; this plan addresses both.
 
 ## For the executing Claude instance
 
