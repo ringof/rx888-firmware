@@ -17,6 +17,7 @@
 #include "radio.h"
 
 #include "health.h"
+#include "synth_pps.h"
 
 // Declare external functions
 extern void CheckStatus(char* StringPtr, CyU3PReturnStatus_t Status);
@@ -285,6 +286,13 @@ CyFxSlFifoApplnUSBSetupCB (
 						glEp0Buffer[off++] = clk0_reg16;                 /* [24] */
 						glEp0Buffer[off++] = si5351_clk0_enabled() ? 1 : 0; /* [25] */
 					}
+					/* Synthetic-PPS diagnostic counters (issue #125).
+					 * Hosts that request wLength=26 keep working — the
+					 * USB block returns only the requested prefix. */
+					memcpy(&glEp0Buffer[off], &glPpsCount, 4);          /* [26..29] */
+					off += 4;
+					memcpy(&glEp0Buffer[off], &glPpsCommitFailCount, 4); /* [30..33] */
+					off += 4;
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}
@@ -490,15 +498,20 @@ CyFxSlFifoApplnUSBSetupCB (
 					break;
 
 				/* DIAGNOSTIC: software-driven in-band PPS marker (issue #125).
-				 * A2 -- stub only: validates arguments and ACKs.  The actual
-				 * timer + CyU3PDmaMultiChannelSetWrapUp() plumbing lands in A3.
-				 * Argument validation here keeps the protocol surface honest
-				 * so A3 can be added with no host-side rework. */
+				 * Dispatches to synth_pps_{stop,start,oneshot}().  The
+				 * argument-validation matrix here (wValue 0..2, wIndex
+				 * 10..60000 ms with 0 -> default 1000 ms) is the user-
+				 * facing contract; SDK-level failures from synth_pps_*
+				 * cause a STALL to keep the host informed. */
 				case SYNTH_PPS:
 					switch (wValue) {
 						case 0: /* stop */
 							DebugPrint(4, "\r\nSYNTH_PPS\tstop");
-							CyU3PUsbAckSetup();
+							if (synth_pps_stop() == CY_U3P_SUCCESS) {
+								CyU3PUsbAckSetup();
+							} else {
+								CyU3PUsbStall(0, CyTrue, CyFalse);
+							}
 							isHandled = CyTrue;
 							break;
 						case 1: /* start */
@@ -506,7 +519,11 @@ CyFxSlFifoApplnUSBSetupCB (
 								uint16_t period_ms = (wIndex == 0) ? 1000 : wIndex;
 								if (period_ms >= 10 && period_ms <= 60000) {
 									DebugPrint(4, "\r\nSYNTH_PPS\tstart period=%ums", period_ms);
-									CyU3PUsbAckSetup();
+									if (synth_pps_start(period_ms) == CY_U3P_SUCCESS) {
+										CyU3PUsbAckSetup();
+									} else {
+										CyU3PUsbStall(0, CyTrue, CyFalse);
+									}
 								} else {
 									DebugPrint(4, "\r\nSYNTH_PPS\tSTALL period=%u out of range", period_ms);
 									CyU3PUsbStall(0, CyTrue, CyFalse);
@@ -516,6 +533,12 @@ CyFxSlFifoApplnUSBSetupCB (
 							break;
 						case 2: /* oneshot */
 							DebugPrint(4, "\r\nSYNTH_PPS\toneshot");
+							/* oneshot returns CY_U3P_ERROR_NOT_STARTED if streaming
+							 * is idle.  We still ACK that case — the host issued a
+							 * valid request and the firmware noted it; the absence
+							 * of a commit shows up as glPpsCommitFailCount in
+							 * GETSTATS rather than as an EP0 STALL. */
+							(void)synth_pps_oneshot();
 							CyU3PUsbAckSetup();
 							isHandled = CyTrue;
 							break;

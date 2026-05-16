@@ -41,6 +41,7 @@ USBSOURCE= cyfxtx.c		\
 	StartStopApplication.c	\
 	StartUp.c		\
 	Support.c		\
+	synth_pps.c		\
 	USBDescriptor.c	\
 	USBHandler.c
 

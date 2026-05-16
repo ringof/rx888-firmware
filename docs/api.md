@@ -80,6 +80,7 @@ All vendor commands target `bmRequestType` with `Type=Vendor`,
 | `0xB2`     | [`STARTADC`](#startadc) | OUT | 4 | Program Si5351 to ADC clock frequency (Hz).   |
 | `0xB3`     | [`GETSTATS`](#getstats) | IN  | ≤64 | Diagnostic counters (see byte layout below). |
 | `0xB6`     | [`SETARGFX3`](#setargfx3) | OUT | n | Set parameter `wIndex` to value `wValue`.  |
+| `0xB7`     | [`SYNTH_PPS`](#synth_pps) | —   | 0 | **Diagnostic.** Software-driven in-band PPS marker (issue #125). |
 | `0xBA`     | [`READINFODEBUG`](#readinfodebug) | IN/OUT | ≤64 | Debug console RX (wValue=ASCII) / TX. |
 | `0xCE`     | [`HANGFX3`](#hangfx3)   | —   | 0 | **Test-only.** Sleep `wValue` ms in EP0 handler. |
 | `0xCF`     | [`HANGMAIN`](#hangmain) | —   | 0 | **Test-only.** Arm main-thread infinite spin. |
@@ -289,7 +290,7 @@ emitted (`USBHandler.c:248-251`).
 Source: `SDDC_FX3/USBHandler.c:256-289`.
 
 Reads back diagnostic counters and state.  The firmware fills a
-fixed-layout buffer of 26 bytes total.
+fixed-layout buffer of 34 bytes total.
 
 | Field         | Value               |
 |---------------|---------------------|
@@ -297,7 +298,7 @@ fixed-layout buffer of 26 bytes total.
 | `bmRequestType` | `0xC0`            |
 | `wValue`      | 0 (ignored)         |
 | `wIndex`      | 0 (ignored)         |
-| `wLength`     | ≤ 64 (firmware sends 26) |
+| `wLength`     | ≤ 64 (firmware sends 34) |
 
 **Byte layout** (little-endian for multi-byte fields):
 
@@ -313,12 +314,14 @@ fixed-layout buffer of 26 bytes total.
 | 20–23  | u32   | `boot_count`      | Increments once per firmware `health_init()` call.  Use to detect mid-test resets: snapshot before, compare after; mismatch means the device reset.  (`USBHandler.c:275`, `SDDC_FX3/health.c:health_boot_count`.) |
 | 24     | u8    | Si5351 CLK0_CONTROL (reg 16) | Live I2C read of the Si5351 CLK0 output-driver control register.  Bit 7 is `CLK0_PDN` — set means CLK0 powered down, clear means CLK0 enabled.  Returns `0xFF` if the I2C read fails.  (`USBHandler.c:283-285`.) |
 | 25     | u8    | `clk0_result`     | Result of the firmware's `si5351_clk0_enabled()` query: `1` = CLK0 enabled (bit 7 clear and I2C read succeeded), `0` = disabled or I2C error.  This is the same value `GpifPreflightCheck()` consults at [`STARTFX3`](#startfx3) time.  (`USBHandler.c:286`.) |
+| 26–29  | u32   | `glPpsCount`      | Successful partial-commit count emitted by the synthetic-PPS module since boot (issue #125).  Bumped on each successful [`SYNTH_PPS`](#synth_pps) wrap-up. |
+| 30–33  | u32   | `glPpsCommitFailCount` | Wrap-up attempts where both producer sockets refused the commit — typically because streaming is idle or the channel is between buffers.  Expected to stay 0 during active streaming. |
 
-The firmware sends exactly 26 bytes via `CyU3PUsbSendEP0Data`; hosts
-should request `wLength=26` (or up to 64) and read the prefix that
-fits.  Hosts written against an earlier firmware that requested
-`wLength=24` continue to work — the firmware will return only the 24
-bytes requested, omitting the new Si5351 CLK0 bytes.
+The firmware sends exactly 34 bytes via `CyU3PUsbSendEP0Data`; hosts
+should request `wLength=34` (or up to 64) and read the prefix that
+fits.  Older host tools that requested `wLength=26` or `wLength=24`
+continue to work — the firmware returns only the prefix requested,
+omitting the newer fields.
 
 ### SETARGFX3
 
@@ -351,6 +354,57 @@ Unrecognized `wIndex` values are signaled by STALLing the status phase
 > Note: protocol-numbered selectors that are absent from the table
 > (e.g. 0–9, 12–13) are **not** currently dispatched by the firmware.
 > They are reserved for future use and will STALL.
+
+### SYNTH_PPS
+
+> **Diagnostic, permanent — safe in production.**  Modeled on the
+> `HANGFX3` / `HANGMAIN` permanence pattern.
+
+Source: `SDDC_FX3/USBHandler.c` (`case SYNTH_PPS`) and `SDDC_FX3/synth_pps.c`.
+
+Software-driven in-band PPS marker (issue #125).  When started, fires
+`CyU3PDmaMultiChannelSetWrapUp()` on the active producer socket of the
+streaming DMA channel at the configured cadence.  Each successful
+wrap-up closes the current DMA buffer with whatever sample bytes it
+holds, producing a short USB bulk transfer on EP1 IN (`actual_length <
+length`) that the host can use as an in-band sample-stream marker.
+
+The mechanism is independent of any GPIF state-machine change and
+needs no external hardware; the companion hardware-PPS issue tracks
+the parallel external-edge path.
+
+| Field         | Value                                |
+|---------------|--------------------------------------|
+| `bRequest`    | `0xB7`                               |
+| `bmRequestType` | `0x40`                             |
+| `wValue`      | Action: `0` stop, `1` start, `2` oneshot |
+| `wIndex`      | Period in ms (only when `wValue=1`)  |
+| `wLength`     | 0                                    |
+
+**Actions:**
+
+- `wValue=0` — stop the periodic timer.  ACK; STALL only on SDK failure.
+- `wValue=1` — start the periodic timer.  `wIndex=0` selects the
+  default 1000 ms period; otherwise `wIndex` must be in `[10, 60000]`
+  milliseconds (ACK on success; STALL on out-of-range or SDK failure).
+- `wValue=2` — fire one immediate wrap-up.  ACK even when streaming is
+  idle (the request was valid; the absence of a commit shows up as
+  `glPpsCommitFailCount++` in `GETSTATS` rather than as an EP0 STALL).
+- `wValue ≥ 3` — STALL (invalid action).
+
+**Observability** — counters in `GETSTATS`:
+
+- offset 26–29 `glPpsCount` — successful wrap-ups since boot.
+- offset 30–33 `glPpsCommitFailCount` — wrap-up attempts where both
+  producer sockets refused.  Expected to stay 0 during active
+  streaming; non-zero typically means the timer fired between buffers
+  or while streaming was stopped.
+
+**Host-side detection of the marker** is by reading
+`xfer->actual_length < xfer->length` on each EP1 IN bulk URB
+completion.  See `tests/rx888_tools/pps_probe.c` (planned) for a
+canonical libusb-only consumer.  The marker's position in the sample
+stream is `total_samples + actual_length / 2` (16-bit samples).
 
 ### READINFODEBUG
 

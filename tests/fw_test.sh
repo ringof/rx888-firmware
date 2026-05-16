@@ -511,13 +511,23 @@ output=$(run_cmd stale_vendor_codes) && {
 }
 
 # ==================================================================
-# 20a. SYNTH_PPS argument validation (issue #125, A2 stub)
+# 20a. SYNTH_PPS argument validation (issue #125, A2)
 # ==================================================================
 
 output=$(run_cmd synth_pps_protocol) && {
     tap_ok "synth_pps_protocol: SYNTH_PPS argument validation (issue #125)"
 } || {
     tap_fail "synth_pps_protocol: SYNTH_PPS protocol surface broken" "$output"
+}
+
+# ==================================================================
+# 20b. SYNTH_PPS produces partial commits while streaming (issue #125, A3)
+# ==================================================================
+
+output=$(run_cmd synth_pps_streaming) && {
+    tap_ok "synth_pps_streaming: glPpsCount advances under active streaming (issue #125)"
+} || {
+    tap_fail "synth_pps_streaming: synth-PPS not firing or counter not advancing" "$output"
 }
 
 # ==================================================================

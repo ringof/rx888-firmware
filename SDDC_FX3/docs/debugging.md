@@ -350,14 +350,14 @@ Read-only EP0 vendor request (IN direction):
 bRequest = 0xB3 (GETSTATS)
 wValue   = 0
 wIndex   = 0
-wLength  = 26    (firmware sends exactly 26 bytes; host may request
+wLength  = 34    (firmware sends exactly 34 bytes; host may request
                   fewer and the firmware will truncate to the
                   requested length)
 ```
 
 ### Response Layout
 
-26 bytes, packed, little-endian (native ARM byte order):
+34 bytes, packed, little-endian (native ARM byte order):
 
 | Offset | Size | Field | Source |
 |--------|------|-------|--------|
@@ -371,6 +371,8 @@ wLength  = 26    (firmware sends exactly 26 bytes; host may request
 | 20--23 | 4 | `boot_count` | `health_boot_count()`; increments once per `health_init()`.  Use to detect mid-test resets (Level 4 `CyU3PDeviceReset`, Level 5 HWDT, manual `RESETFX3`, or power cycle): snapshot before, compare after, mismatch means the device reset. |
 | 24 | 1 | Si5351 CLK0_CONTROL (reg 16) | Live `I2cTransfer(0x10, 0xC0, …)`.  Bit 7 is `CLK0_PDN`: set means CLK0 is powered down, clear means CLK0 is enabled.  Returns `0xFF` if the I2C read fails. |
 | 25 | 1 | `clk0_result` | `si5351_clk0_enabled()` (1 = CLK0 enabled, 0 = disabled or I2C error).  Same value `GpifPreflightCheck()` consults at `STARTFX3` time. |
+| 26--29 | 4 | `glPpsCount` | Synthetic-PPS successful partial-commit count since boot (issue #125).  Bumped by the `synth_pps` module on each `CyU3PDmaMultiChannelSetWrapUp` that the active producer socket accepts. |
+| 30--33 | 4 | `glPpsCommitFailCount` | Wrap-up attempts where both producer sockets refused — typically because streaming is idle or the channel is between buffers.  Expected to stay 0 during active streaming. |
 
 ### Counter Behavior
 
@@ -526,7 +528,7 @@ Runs 36 tests (39 with streaming) in TAP format:
 | 19 | Debug buffer race | 50 rapid poll cycles survive (issue #8) |
 | 20 | Debug console over USB | `?` command returns help text (issue #26) |
 | 21 | Stack watermark | Free > 25% of 2048 bytes after init (issue #12) |
-| 22 | GETSTATS readout | GETSTATS (0xB3) returns 26 bytes with sane values |
+| 22 | GETSTATS readout | GETSTATS (0xB3) returns 34 bytes with sane values |
 | 23 | GETSTATS I2C counter | I2C failure count increments after NACK on absent address |
 | 24 | GETSTATS PLL status | Si5351 PLL A locked, SYS_INIT clear |
 | 25 | GPIF stop state | GPIF SM state is 0, 1, or 255 after STOPFX3 (not stuck in read) |

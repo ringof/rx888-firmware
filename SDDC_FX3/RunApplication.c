@@ -14,6 +14,7 @@
 #include "Si5351.h"
 
 #include "health.h"
+#include "synth_pps.h"
 
 #define R828D_I2C_ADDR		0x74
 
@@ -375,6 +376,10 @@ void CyFxApplicationDefine (void) {
 
     // Initialize the recovery state machine (no-op for events not yet wired).
     health_init();
+
+    // Initialize the software-driven in-band PPS marker module (issue #125).
+    // Creates the timer in stopped state; SYNTH_PPS vendor command drives it.
+    (void)synth_pps_init();
 
     // Create Queue used to transfer callback messages
         Status = CyU3PQueueCreate(&glEventAvailable, 1, &glEventAvailableQueue, sizeof(glEventAvailableQueue));
