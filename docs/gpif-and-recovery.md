@@ -2,13 +2,21 @@
 title: GPIF & Recovery
 nav_order: 6
 permalink: /gpif-and-recovery/
+description: Cypress FX3 GPIF II state machine for the RX888mk2 - states, transitions, soft-stop via FW_TRG deassert, force-stop fallback, streaming-wedge watchdog.
 ---
 
-# GPIF State Machine and Recovery Architecture
+# GPIF State Machine and Recovery
 
 This document describes the GPIF II state machine design, the soft-stop
-mechanism, and the layered recovery architecture that keeps the RX888mk2
-firmware streaming reliably under adverse conditions.
+mechanism, and the GPIF-level recovery actions (force-stop fallback and
+the streaming-wedge watchdog) that keep the streaming pipeline alive.
+
+It covers the GPIF slice of the recovery story only.  The firmware also
+has higher-level recovery layers (EP0 vendor-handler liveness check with
+device reset, and an FX3 hardware-watchdog catastrophic backstop) that
+sit above the GPIF watchdog and handle wedges the GPIF layer cannot
+see.  For the full cascade across all layers, see
+[README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness).
 
 For general firmware architecture, see [architecture.md](architecture.md).
 For clock-loss detection specifics, see [wedge_detection.md](wedge_detection.md).
@@ -295,130 +303,104 @@ it always did.
 
 ---
 
-## Layered recovery architecture
+## GPIF-level recovery
 
-The firmware implements four layers of recovery, from lightest to
-heaviest.  Each layer handles failures that the layer above cannot.
+This section covers only the GPIF-specific recovery mechanisms.  The
+firmware's full recovery story spans multiple layers — GPIF watchdog,
+EP0 vendor-handler liveness check, and FX3 hardware watchdog — see
+[README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness)
+for the cascade across all layers.
 
-### Layer 1: Soft-stop (STOPFX3 / watchdog)
+### Soft-stop and force-stop
 
-**Trigger**: Host issues STOPFX3, or watchdog detects DMA stall.
+The GPIF state machine has two stop paths.
 
-**Action**: Deassert FW_TRG → SM exits to IDLE → disable GPIF →
-reset DMA → flush USB endpoint.
+**Soft-stop** is the routine path.  The firmware deasserts `FW_TRG`,
+waits ~1 ms for the SM to exit to IDLE via the `!FW_TRG` transitions
+described above, then disables GPIF cleanly.  Used by both STOPFX3
+and the streaming watchdog.  Leaves no residual state because the SM
+is in IDLE when disabled.  Latency dominated by the 1 ms sleep, not
+the SM transition (which completes in 3 clocks ≈ 47 ns at 64 MHz).
 
-**Latency**: ~1 ms (dominated by `CyU3PThreadSleep`, not the SM).
+**Force-stop** is the fallback.  If soft-stop times out — SM did not
+reach IDLE after the wait — the firmware calls
+`CyU3PGpifDisable(CyTrue)`, which kills the GPIF hardware
+unconditionally.  This wipes configuration and requires
+`CyU3PGpifLoad` to restart.  Triggered when the external clock is
+not running or PLL is unlocked: with no clock edges, the SM cannot
+advance to IDLE regardless of `FW_TRG`.
 
-**What it fixes**: Normal stop/start cycles, backpressure-induced
-stalls, routine watchdog recoveries.  Leaves no residual state
-because the SM is in IDLE when disabled.
+Both paths are followed by a DMA channel reset and a USB endpoint
+flush before any restart attempt.
 
-### Layer 2: Force-stop fallback
+### Streaming-wedge watchdog
 
-**Trigger**: Soft-stop fails — SM did not reach IDLE after FW_TRG
-deassert (dead clock, PLL unlock, unexpected SM state).
+The main thread polls `glDMACount` every 100 ms while streaming.  If
+the count fails to advance for three consecutive polls (~300 ms) and
+the GPIF SM is in a BUSY or WAIT state (`TH0_BUSY` (5), `TH1_BUSY` (7),
+`TH1_WAIT` (8), or `TH0_WAIT` (9)), the pipeline is wedged and the
+watchdog runs a recovery:
 
-**Action**: `CyU3PGpifDisable(CyTrue)` — kills GPIF hardware
-unconditionally.  Wipes configuration; requires `CyU3PGpifLoad` to
-restart.
+1. Soft-stop (with force-stop fallback).
+2. DMA channel reset and USB endpoint flush.
+3. If the Si5351 reports the ADC clock enabled and PLL locked,
+   re-arm the DMA channel, reload GPIF, restart the SM, and
+   reassert `FW_TRG`.  Otherwise wait — soft-stop requires clock
+   edges, and a re-arm with no clock just re-wedges.
 
-**Latency**: ~1 ms.
+Total latency: ~300 ms (detection) + ~1 ms (recovery).
 
-**What it fixes**: Hardware faults where the external clock is not
-running and the SM cannot advance to IDLE.  This is the last resort
-before requiring host intervention.
+The watchdog fixes DMA pipeline wedges caused by transient USB
+backpressure, xHCI endpoint ring issues, or momentary clock glitches.
+It does not fix EP0-handler hangs or main-thread death — those are
+handled by the higher cascade layers (see the README).
 
-### Layer 3: Watchdog recovery
+### Recovery cap
 
-**Trigger**: `glDMACount` stops advancing for 3 consecutive 100 ms
-polls while the SM is in a BUSY or WAIT state (states 5, 7, 8, 9).
-
-**Action**: Soft-stop (with force-stop fallback) → DMA channel
-reset → USB endpoint flush → if clock is healthy: DMA re-arm →
-GPIF reload and restart → reassert FW_TRG.
-
-**Latency**: ~300 ms (stall detection) + ~1 ms (recovery).
-
-**Recovery cap**: Limited to `WDG_MAX_RECOVERY_DEFAULT` (5)
+The streaming watchdog is capped at `WDG_MAX_RECOVERY_DEFAULT` (5)
 consecutive recoveries per session.  After the cap is reached, the
 watchdog stops retrying and waits for the host to issue STARTFX3.
 The cap prevents unbounded recovery loops when the host is not
 draining data (application crash, abandoned stream).  The cap
-counter resets on STARTFX3 and STOPFX3.
-
-**What it fixes**: DMA pipeline wedges caused by transient USB
-backpressure, xHCI endpoint ring issues, or momentary clock glitches.
-
-### Layer 4: Host restart
-
-**Trigger**: Application decides to restart (timeout on bulk read,
-GETSTATS shows stale dma_count, or scheduled reconfiguration).
-
-**Action**: STOPFX3 → STARTFX3.  Resets all pipeline state: DMA
-channels, GPIF configuration (full reload), counters, and watchdog
-recovery cap.
-
-**Latency**: ~100 ms (including USB control transfer round-trips).
-
-**What it fixes**: Everything that the watchdog cannot — including
-the state after the watchdog cap is reached, firmware-level
-configuration errors, and frequency changes that require ADC clock
-reprogramming.
-
-### Recovery hierarchy summary
-
-| Layer | Trigger | Action | Latency | Leaves debris? |
-|-------|---------|--------|---------|----------------|
-| Soft-stop | STOPFX3 / watchdog | FW_TRG deassert → IDLE → disable | ~1 ms | No |
-| Force-stop | Soft-stop failure | `CyU3PGpifDisable(CyTrue)` | ~1 ms | Possible |
-| Watchdog | DMA stall 300 ms | Tear down + rebuild pipeline | ~300 ms | No (uses soft-stop) |
-| Host restart | Application decision | STOPFX3 + STARTFX3 | ~100 ms | No (full reset) |
-
-### What cannot be recovered
-
-- **USB disconnect**: The FX3 re-enumerates; the host must re-open
-  the device.
-- **Firmware crash**: The FX3 falls back to DFU bootloader mode
-  (PID 0x00F3); the host must re-upload firmware.
-- **Hardware fault**: Dead ADC, broken clock crystal, or damaged
-  FX3.  No software recovery is possible.
+counter resets on STARTFX3 and STOPFX3.  The cap value is
+runtime-configurable via SETARGFX3 `WDG_MAX_RECOV` (wIndex 14); 0
+disables the cap entirely.
 
 ---
 
-## Soak test evidence
+## Soft-stop landing: before/after evidence
 
-The recovery architecture was validated with a randomized soak test
-(`fx3_cmd soak`) that exercises 39 scenarios including streaming,
-stop/start cycling, clock manipulation, I2C under load, EP0 stress,
-and deliberate fault injection.
+The soft-stop mechanism described above was introduced after
+soak-testing revealed that force-stop-only behavior cascaded between
+scenarios: force-stop debris from one cycle stalled the next.  The
+following comparison (both runs at seed 20, on the firmware revisions
+before and after the soft-stop change) is preserved here as the
+GPIF-specific evidence for that landing.  For current
+firmware-wide soak metrics, see the README and `CHANGELOG.md`.
 
-### Before soft-stop (force-stop only)
-
-688 cycles, seed 20:
+### Before soft-stop (force-stop only) — 688 cycles, seed 20
 
 - 239 streaming faults (watchdog recoveries)
-- 4 dma_count_monotonic failures (31% failure rate)
+- 4 `dma_count_monotonic` failures (31% failure rate)
 - All failures show GPIF state 255 (SM killed mid-transaction)
 - Cascading recovery pattern: force-stop debris from one scenario
   stalls the next
 
-### After soft-stop
-
-534 cycles, seed 20:
+### After soft-stop — 534 cycles, seed 20
 
 - 0 device crashes (534/534 health checks passed)
-- 0 stop_start_cycle failures (51/51)
-- 0 dma_count_monotonic failures (10/10)
-- 0 dma_count_reset failures (11/11)
-- 0 sustained_stream failures (8/8, 99% throughput)
+- 0 `stop_start_cycle` failures (51/51)
+- 0 `dma_count_monotonic` failures (10/10)
+- 0 `dma_count_reset` failures (11/11)
+- 0 `sustained_stream` failures (8/8, 99% throughput)
 - GPIF state consistently 1 (IDLE) at stop, never 255
 - 37 of 39 scenarios at 100% pass rate
 
 The two remaining failure scenarios (`abandoned_stream`,
-`watchdog_cap_observe`) were caused by a test harness bug that
+`watchdog_cap_observe`) were caused by a test-harness bug that
 disabled the watchdog recovery cap, not a firmware issue.
 
-### Running the soak test
+### Reproducing the comparison
 
 The soak test requires an RX888mk2 connected via USB with firmware
 loaded.  Build the test tools, then run:
@@ -428,15 +410,11 @@ cd tests && make
 sudo ./fx3_cmd soak 1 20
 ```
 
-Arguments: `soak [hours] [seed] [max_scenarios]`.  The default is 1
-hour with a random seed.  `seed 20` is the baseline used for the
-before/after comparison above.  The test runs 39 weighted-random
-scenarios in a loop, with a health check (TESTFX3 + GETSTATS) between
-each one.  Press Ctrl-C for an early summary.
-
-The 1-hour soak with seed 20 passed with **zero device crashes** and
-**100% health-check pass rate** across 500+ cycles on the current
-firmware.
+Arguments: `soak [hours] [seed] [max_scenarios]`.  `seed 20` is the
+baseline used for the comparison above.  The test runs a
+weighted-random rotation of scenarios in a loop, with a health
+check (TESTFX3 + GETSTATS) between each one.  Press Ctrl-C for an
+early summary.
 
 ---
 

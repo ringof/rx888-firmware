@@ -2,6 +2,7 @@
 title: Building
 nav_order: 3
 permalink: /building/
+description: How to build the RX888mk2 Cypress FX3 firmware from source with arm-none-eabi-gcc on Debian/Ubuntu, and how to flash a fresh image to the device.
 ---
 
 # Building the firmware

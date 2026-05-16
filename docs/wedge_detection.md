@@ -2,6 +2,7 @@
 title: Wedge detection
 nav_order: 8
 permalink: /wedge_detection/
+description: Detecting and recovering from FX3 DMA wedges caused by Si5351 PLL unlock or clock loss mid-stream - PIB callbacks, DMA count polling, pre-flight checks.
 ---
 
 # GPIF Clock Loss Detection and Wedge Recovery
@@ -16,6 +17,17 @@ of physically unplugging the device.
 This document explains why the wedge happens, what detection mechanisms
 the FX3 SDK provides, and how the firmware now implements a
 stop-and-wait recovery.
+
+This doc covers the GPIF (streaming) slice of wedge detection only.
+The broader recovery cascade in the firmware also handles EP0
+vendor-handler hangs (Level 4 device reset) and main-thread death
+(Level 5 FX3 HWDT) — see
+[README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness)
+for the canonical cross-layer view.  The GPIF streaming watchdog
+described below is currently independent of `SDDC_FX3/health.c` and
+lives in `SDDC_FX3/RunApplication.c`; migrating it behind
+`health_evaluate()` / `health_recover(WEDGED_STREAMING)` is tracked
+as issue #115.
 
 ---
 
@@ -94,12 +106,12 @@ These catch the **secondary failure** (DMA congestion after the host
 stops reading), not the clock loss itself.
 
 **Implementation:** The callback is registered in `StartApplication()`
-(`StartStopApplication.c:167`):
+(`SDDC_FX3/StartStopApplication.c`):
 ```c
 CyU3PPibRegisterCallback(PibErrorCallback, CYU3P_PIB_INTR_ERROR);
 ```
 
-The callback body (`StartStopApplication.c:41-49`) increments
+The callback body (`PibErrorCallback`, same file) increments
 `glCounter[0]`, saves the error argument in `glLastPibArg`, and posts
 the event to the `glEventAvailable` queue where `MsgParsing()` prints
 it to the debug console as `"PIB error 0x..."`.
@@ -132,9 +144,10 @@ detects:
 At 100 ms polling interval, even the slowest rate produces ~48 buffers
 per interval.  A zero-delta is an unambiguous stall indicator.
 
-**Implementation:** The GPIF watchdog in `RunApplication.c:216-295`
-uses `glDMACount` delta == 0 as the first trigger condition.  The
-count must also be > 0 (streaming has started) to avoid false triggers
+**Implementation:** The GPIF watchdog in
+`SDDC_FX3/RunApplication.c`'s `ApplicationThread()` main loop uses
+`glDMACount` delta == 0 as the first trigger condition.  The count
+must also be > 0 (streaming has started) to avoid false triggers
 on idle devices.
 
 ### 3. GPIF state machine polling
@@ -180,15 +193,15 @@ symptom (DMA stall).
 **Implementation:** Used in two places:
 
 1. **Pre-flight check** (`GpifPreflightCheck()` in
-   `StartStopApplication.c:89-100`): called before every `STARTFX3`.
+   `SDDC_FX3/StartStopApplication.c`): called before every `STARTFX3`.
    Verifies CLK0 is enabled (`si5351_clk0_enabled()`) and PLL A is
    locked (`si5351_pll_locked()`).  If either fails, `STARTFX3` is
    rejected with an EP0 STALL.
 
-2. **Watchdog recovery** (`RunApplication.c:253-268`): after tearing
-   down the pipeline, the watchdog reads PLL lock status.  If locked,
-   it auto-restarts streaming.  If unlocked, it leaves the pipeline
-   stopped and waits for the host to reconfigure.
+2. **Watchdog recovery** (in `RunApplication.c`'s watchdog block):
+   after tearing down the pipeline, the watchdog reads PLL lock
+   status.  If locked, it auto-restarts streaming.  If unlocked, it
+   leaves the pipeline stopped and waits for the host to reconfigure.
 
 3. **GETSTATS** (`USBHandler.c`): the Si5351 status register is
    sampled at read time and returned as byte 19 of the GETSTATS
@@ -239,7 +252,7 @@ device crashes with this architecture.
 
 ## Implemented recovery
 
-### GPIF watchdog (`RunApplication.c:216-295`)
+### GPIF watchdog (in `SDDC_FX3/RunApplication.c`)
 
 The application thread runs a watchdog inside the existing 100 ms
 polling loop.  The detection and recovery sequence is:
@@ -272,7 +285,7 @@ graph TD
     WAIT --> DONE2["Increment glCounter 2<br/>Reset stall counter + DMA count<br/>Log RECOVERY WAIT"]
 ```
 
-### Pre-flight check (`StartStopApplication.c:89-100`)
+### Pre-flight check (in `SDDC_FX3/StartStopApplication.c`)
 
 Every `STARTFX3` vendor command runs `GpifPreflightCheck()` before
 touching the GPIF:
@@ -308,17 +321,36 @@ The host is informed of watchdog recovery events through:
 
 ## Implementation status
 
-| Priority | Change | Status | Detection latency |
-|----------|--------|--------|-------------------|
-| **1** | PIB error callback: log + post event to app thread | **Done** (`StartStopApplication.c:41-49,167`) | ~ms (interrupt-driven) |
-| **2** | `glDMACount` delta check in watchdog | **Done** (`RunApplication.c:221`) | 100-300 ms (polling) |
-| **3** | Si5351 PLL lock check before STARTFX3 (preflight) | **Done** (`StartStopApplication.c:89-100`) | N/A (pre-flight) |
-| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | **Done** (`RunApplication.c:226-228`) | 100-300 ms (polling) |
-| **5** | Si5351 PLL lock check during recovery | **Done** (`RunApplication.c:262`) | 300 ms (after 3 stall polls) |
-| **5b** | Watchdog recovery cap (`glWdgMaxRecovery`) | **Done** (`RunApplication.c:235-240`) | N/A (limit, not detection) |
-| **6** | Add `!FW_TRG → IDLE` transitions to GPIF SM | **Done** (`SDDC_GPIF.h`, see [gpif-and-recovery.md](gpif-and-recovery.md)) | <1 clock (~16 ns) |
+| Priority | Change | Lives in | Detection latency |
+|----------|--------|----------|-------------------|
+| **1** | PIB error callback: log + post event to app thread | `SDDC_FX3/StartStopApplication.c` (`PibErrorCallback`) | ~ms (interrupt-driven) |
+| **2** | `glDMACount` delta check in watchdog | `SDDC_FX3/RunApplication.c` (watchdog block) | 100-300 ms (polling) |
+| **3** | Si5351 PLL lock check before STARTFX3 (preflight) | `SDDC_FX3/StartStopApplication.c` (`GpifPreflightCheck`) | N/A (pre-flight) |
+| **4** | GPIF state polling in watchdog (BUSY/WAIT detection) | `SDDC_FX3/RunApplication.c` (watchdog block) | 100-300 ms (polling) |
+| **5** | Si5351 PLL lock check during recovery | `SDDC_FX3/RunApplication.c` (watchdog recovery) | 300 ms (after 3 stall polls) |
+| **5b** | Watchdog recovery cap (`glWdgMaxRecovery`) | `SDDC_FX3/RunApplication.c` (watchdog cap counter) | N/A (limit, not detection) |
+| **6** | Add `!FW_TRG → IDLE` transitions to GPIF SM | `SDDC_FX3/SDDC_GPIF.h`; see [gpif-and-recovery.md](gpif-and-recovery.md) | <1 clock (~16 ns) |
 
 All priorities are implemented.  The silent wedge is now a
 detected-and-recovered condition.  Priority 6 (soft-stop via
-`CyU3PGpifDisable(CyFalse)`) was validated with 500+ soak test
-cycles at zero device crashes.
+`CyU3PGpifDisable(CyFalse)`) was validated by a 500+ cycle soak run
+at zero device crashes — see
+[gpif-and-recovery.md §Soft-stop landing: before/after evidence](gpif-and-recovery.md#soft-stop-landing-beforeafter-evidence)
+for the comparison numbers.  Current firmware-wide soak status lives
+in the [README](https://github.com/ringof/rx888-firmware#firmware-robustness)
+and `CHANGELOG.md`.
+
+### Relationship to the broader recovery cascade
+
+The streaming watchdog described above is the **Level 1** of the
+firmware's five-level recovery cascade.  Levels 4 (EP0 vendor-handler
+wedge → device reset) and 5 (main-thread death → FX3 hardware
+watchdog) are implemented in `SDDC_FX3/health.c` and cover wedge
+classes the GPIF watchdog cannot see.  See
+[README §Firmware Robustness](https://github.com/ringof/rx888-firmware#firmware-robustness)
+for the cross-layer view.
+
+Today the GPIF watchdog is **independent** of `health.c` — it lives
+in `RunApplication.c`'s main loop and owns its own state.  Migrating
+it behind the `health_evaluate` / `health_recover(WEDGED_STREAMING)`
+interface is tracked as issue #115.

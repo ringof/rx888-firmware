@@ -2,15 +2,17 @@
 title: ka9q-radio compat audit
 nav_order: 10
 permalink: /ka9q-compat-audit/
+description: Static audit of ka9q-radio against the RX888mk2 FX3 firmware - vendor-command compatibility, STARTADC/STARTFX3 ordering (fixed in v0.1.0), VHF/HF coverage.
 ---
 
 # ka9q-radio ↔ SDDC_FX3 Compatibility Audit
 
-Status: **initial findings, container-side patches landed**
+Status: **container-side patches retired in v0.1.0** — the only host-side workaround (patch 03) is no longer needed; see §8 for the firmware fix.
 
 This document captures a static compatibility audit of ka9q-radio's
 `rx888.so` plugin against the SDDC_FX3 firmware in this repository.
-It is intentionally narrow: every claim cites a specific source line.
+Every claim cites a specific source file; behavior is named by
+function so the analysis stays valid across line shifts.
 
 ## Reproducer
 
@@ -44,13 +46,13 @@ It is intentionally narrow: every claim cites a specific source line.
 |---|---|---|---|
 | STARTFX3 | 0xAA | ✅ | |
 | STOPFX3 | 0xAB | ✅ | |
-| TESTFX3 | 0xAC | ✅ | |
+| TESTFX3 | 0xAC | ✅ | Defined in `rx888.h` but never sent by ka9q — see §9. |
 | GPIOFX3 | 0xAD | ✅ | LED bit positions differ — see §4. |
 | I2CWFX3 | 0xAE | ✅ | |
 | I2CRFX3 | 0xAF | ✅ | |
 | RESETFX3 | 0xB1 | ✅ | |
 | STARTADC | 0xB2 | ✅ | Both sides sleep ~1 s; see §7. |
-| TUNERINIT | 0xB4 | ❌ STALL | Only inside `#if 0` (`rx888.c:950–980`). |
+| TUNERINIT | 0xB4 | ❌ STALL | Only inside `#if 0` in `rx888.c`. |
 | TUNERTUNE | 0xB5 | ❌ STALL | Only inside `#if 0`. |
 | SETARGFX3 wIndex 1 (R82XX_ATTENUATOR) | 0xB6 | ❌ STALL | VHF only — see §3. |
 | SETARGFX3 wIndex 2 (R82XX_VGA)        | 0xB6 | ❌ STALL | VHF only. |
@@ -67,16 +69,11 @@ SDDC firmware `docs/architecture.md` §"Command table" and
 
 ### 1. `sleep(1)` after firmware upload *(ka9q-side, documented; no patch)*
 
-`src/rx888.c:700`:
-
-```c
-sleep(1); // how long should this be?
-```
-
-After firmware upload, ka9q sleeps once for one second, then performs
-a **single** scan for `0x04b4:0x00f1` and returns "Error or device
-could not be found" if absent (`rx888.c:803–804`). The author's own
-comment flags the value as a guess.
+After firmware upload, `rx888_usb_init()` in ka9q's `src/rx888.c`
+sleeps once for one second, then performs a **single** scan for
+`0x04b4:0x00f1` and returns "Error or device could not be found" if
+absent.  The author's own comment on the `sleep(1)` flags the value
+as a guess.
 
 Original misdiagnosis: this was *thought* to be the cause of the
 container's "Error or device could not be found" failure.  It was
@@ -97,21 +94,21 @@ last firmware byte is acked (per `usbmon`), and the upstream
 `sleep(1)` + single rescan succeeds reliably.  Verified working on
 the project's reference hardware.
 
-A polling-with-timeout pattern in `rx888.c:700` would be more robust
-on pathologically slow hosts, but it is not required for SDDC
-streaming to work, so we do not patch it — the cost of a
-not-strictly-necessary upstream ask outweighs the benefit on
-hypothetical hardware.
+A polling-with-timeout pattern in place of the fixed `sleep(1)`
+would be more robust on pathologically slow hosts, but it is not
+required for SDDC streaming to work, so we do not patch it — the
+cost of a not-strictly-necessary upstream ask outweighs the benefit
+on hypothetical hardware.
 
 ### 2. TUNERSTDBY (0xB8) on the HF path *(ka9q-side, cosmetic; no patch)*
 
-`src/rx888.c:943` (`rx888_set_hf_mode`) and `src/rx888.c:1003`
-(`rx888_start_rx`) both fire `command_send(...,TUNERSTDBY,0)`. SDDC
-firmware removed all R82xx commands (`docs/LICENSE_ANALYSIS.md`),
-so 0xB8 returns a clean USB STALL via the firmware's default
-handler.  ka9q's `command_send` ignores the return value, so
-streaming is unaffected and init proceeds normally.  The only effect
-is bus-level noise: two STALLed control transfers per session.
+ka9q's `rx888_set_hf_mode()` and `rx888_start_rx()` both fire
+`command_send(...,TUNERSTDBY,0)`.  SDDC firmware removed all R82xx
+commands (see `docs/LICENSE_ANALYSIS.md`), so 0xB8 returns a clean
+USB STALL via the firmware's default handler.  ka9q's `command_send`
+ignores the return value, so streaming is unaffected and init
+proceeds normally.  The only effect is bus-level noise: two STALLed
+control transfers per session.
 
 We do not patch this either — purely cosmetic, would not change
 observable behavior, and removing two unconditional command sends
@@ -120,16 +117,16 @@ patch most maintainers will reject as not-their-bug.
 
 ### 3. R82xx VHF path *(deferred, out of scope)*
 
-`rx888.c:921` (`R82XX_ATTENUATOR`), `rx888.c:937` (`R82XX_VGA`),
-`rx888.c:972–973` (TUNERINIT, TUNERTUNE — inside `#if 0`).
-
-VHF will not work end-to-end because SDDC removed every R82xx code
-path; ka9q itself flags VHF as broken (`rx888.c:11`,
-"VHF tuner does not work yet -- KA9Q, 17 Aug 2024"). HF is unaffected.
+ka9q's `rx888.c` issues `R82XX_ATTENUATOR` and `R82XX_VGA` on the
+VHF init path, plus `TUNERINIT` and `TUNERTUNE` inside an `#if 0`
+block.  VHF will not work end-to-end because SDDC removed every
+R82xx code path; ka9q itself flags VHF as broken in a top-of-file
+comment ("VHF tuner does not work yet -- KA9Q, 17 Aug 2024").
+HF is unaffected.
 
 ### 4. GPIO LED bit-position mismatch *(cosmetic)*
 
-| Bit | ka9q (`rx888.h:131–133`) | SDDC firmware (`docs/architecture.md` §"GPIOFX3 bitmask protocol") |
+| Bit | ka9q (`rx888.h`) | SDDC firmware (`docs/architecture.md` §"GPIOFX3 bitmask protocol") |
 |-----|-------|----------|
 | 10  | `LED_YELLOW` | unused |
 | 11  | `LED_RED`    | `LED_BLUE` |
@@ -141,65 +138,102 @@ could converge to the other's mapping; deferred.
 
 ### 5. SuperSpeed gate *(host topology, not SDDC)*
 
-`src/rx888.c:769` rejects anything below `LIBUSB_SPEED_SUPER`
-silently inside the scan loop, then exits with the same
-"device could not be found" string. If the device is plugged into a
-USB-2 port or behind a hub that downgrades, ka9q reports
-identical-looking output. Worth flagging in user docs.
+ka9q's `rx888.c` rejects anything below `LIBUSB_SPEED_SUPER`
+silently inside its device scan loop, then exits with the same
+"device could not be found" string.  If the device is plugged into
+a USB-2 port or behind a hub that downgrades, ka9q reports
+identical-looking output.  Worth flagging in user docs.
 
 ### 6. PID `0x00F1` matches ✅
 
-ka9q's `Loaded_product_id = 0x00f1` (`rx888.c:36`) matches SDDC
-firmware's advertised PID (`docs/architecture.md` §687–692).
+ka9q's `Loaded_product_id = 0x00f1` in `rx888.c` matches SDDC
+firmware's advertised PID (see `docs/architecture.md` §"USB
+descriptors").
 
 ### 7. STARTADC settling
 
-SDDC firmware sleeps 1000 ms inside the `STARTADC` handler after
-PLL programming (`docs/architecture.md` §"Frequency setting
-algorithm"); ka9q also sleeps ~1 s host-side around PLL config
-(`rx888.c:400`). Total ~2 s; slower than necessary but not broken.
+SDDC firmware's `STARTADC` handler polls `si5351_pll_locked()` for
+up to ~100 ms after programming the PLL, returning as soon as PLL A
+reports lock (see `docs/architecture.md` §"Clock synthesis").  ka9q
+also sleeps ~1 s host-side around its direct Si5351 programming in
+`rx888_set_samprate()`.  The firmware-side wait used to be a fixed
+~1 s sleep before commit `13b2091`; together with ka9q's host-side
+sleep the round trip was ~2 s.  As of v0.1.0 the firmware contributes
+≤100 ms and the round trip is dominated by ka9q's host-side wait.
 
-### 8. Show-stopper: missing `STARTADC` before `STARTFX3` *(ka9q-side)*
+### 8. Show-stopper: missing `STARTADC` before `STARTFX3` *(resolved firmware-side in v0.1.0)*
 
-ka9q programs the Si5351 directly via raw `I2CWFX3` writes
-(`rx888.c:331`, `rx888.c:340`) and intentionally never calls
-`STARTADC` (the `docker/ka9q-radio/README.md` originally documented
-this as a feature: "bypasses firmware STARTADC").  Against stock
-RX888 firmware where `STARTADC` only does Si5351 setup, this works.
+> **Resolved in firmware** (commit
+> [`13b2091`](https://github.com/ringof/rx888-firmware/commit/13b2091),
+> released in **v0.1.0**).  `si5351_clk0_enabled()` now reads CLK0_CONTROL
+> register 16 bit 7 over I2C instead of consulting a stale
+> `glAdcClockEnabled` host-cache flag.  `GpifPreflightCheck()` therefore
+> sees the live chip state, ka9q-radio's direct Si5351 programming
+> path passes preflight without `STARTADC`, and patch 03 has been
+> retired (kept in-tree as `.patch.disabled` for archaeology — see
+> `docker/ka9q-radio/patches/README.md`).  The analysis below is
+> preserved as a record of the original failure mode.
 
-SDDC firmware tracks ADC-clock readiness via a separate global flag
-`glAdcClockEnabled` (`SDDC_FX3/driver/Si5351.c:55`), set `CyTrue`
-*only* inside `si5351aSetFrequencyA(freq>0)`
-(`SDDC_FX3/driver/Si5351.c:250`), called *only* from the `STARTADC`
-handler (`SDDC_FX3/USBHandler.c:219`).  The `STARTFX3` handler then
-runs `GpifPreflightCheck()`
-(`SDDC_FX3/StartStopApplication.c:99`) before starting the GPIF
-state machine:
+
+ka9q programs the Si5351 directly via raw `I2CWFX3` writes (in
+`rx888_set_samprate()`) and intentionally never calls `STARTADC`
+(the `docker/ka9q-radio/README.md` originally documented this as a
+feature: "bypasses firmware STARTADC").  Against stock RX888
+firmware where `STARTADC` only does Si5351 setup, this works.
+
+Pre-v0.1.0 SDDC firmware tracked ADC-clock readiness via a separate
+global flag `glAdcClockEnabled` in `SDDC_FX3/driver/Si5351.c`, set
+`CyTrue` *only* inside `si5351aSetFrequencyA(freq>0)`, called *only*
+from the `STARTADC` handler in `SDDC_FX3/USBHandler.c`.  The
+`STARTFX3` handler then ran `GpifPreflightCheck()` in
+`SDDC_FX3/StartStopApplication.c` before starting the GPIF state
+machine:
 
     if (!si5351_clk0_enabled())  return CyFalse;  // glAdcClockEnabled
     if (!si5351_pll_locked())    return CyFalse;
 
-`si5351_clk0_enabled()` returns the bare flag
-(`SDDC_FX3/driver/Si5351.c:174`) — it does not query the chip — so
-even though ka9q has correctly programmed Si5351 via I2C and the
-PLL is physically locked, the flag remains `CyFalse`.  `STARTFX3`
-stalls EP0 (`SDDC_FX3/USBHandler.c:333`), GPIF never starts, no
-bulk data flows, and radiod times out:
+`si5351_clk0_enabled()` returned the bare flag — it did not query
+the chip — so even though ka9q had correctly programmed Si5351 via
+I2C and the PLL was physically locked, the flag remained `CyFalse`.
+`STARTFX3` stalled EP0, GPIF never started, no bulk data flowed,
+and radiod timed out:
 
     rx888 running
     No rx888 data for 5 seconds, quitting
 
-By comparison, `rx888_stream` (the test harness) sends the commands
-in the order SDDC requires (`rx888_stream.c:1185 / 1193`):
+By comparison, `rx888_stream` (the test harness) sent the commands
+in the order SDDC required:
 
     DAT31_ATT → AD8340_VGA → STARTADC(samprate) → STARTFX3 → ...
 
-Fix: send `STARTADC` with the configured sample rate just before
-`STARTFX3` in `rx888_start_rx()`.  STARTADC reprograms Si5351 to
-the same frequency ka9q already wrote (harmless duplicate), sets
+The original container-side fix was to insert
+`command_send(...,STARTADC,samprate)` before `STARTFX3` in
+`rx888_start_rx()`: STARTADC reprograms Si5351 to the same
+frequency ka9q already wrote (harmless duplicate), sets
 `glAdcClockEnabled = CyTrue`, polls PLL lock (already locked,
-returns immediately), and `STARTFX3`'s preflight then passes.  See
-`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`.
+returns immediately), and `STARTFX3`'s preflight then passes.
+
+That fix shipped as `docker/ka9q-radio/patches/03-startadc-before-startfx3.patch`
+through commit `13b2091`, at which point the firmware-side fix in
+§8's resolution banner above made the host-side patch unnecessary.
+The disabled patch file remains in-tree as
+`03-startadc-before-startfx3.patch.disabled` for archaeology; see
+`docker/ka9q-radio/patches/README.md`.
+
+### 9. TESTFX3 (0xAC) defined but not exercised *(no host coordination needed)*
+
+ka9q's `rx888.h` defines `TESTFX3 = 0xAC` in the `FX3Command` enum,
+but `rx888.c` contains zero occurrences of `TESTFX3`, `0xAC`, or
+the word "version".  The plugin never issues the `TESTFX3` request,
+never reads the device's model/version word, and has no version
+comparison logic.
+
+Implication: SDDC firmware's `FIRMWARE_VER_MAJOR` /
+`FIRMWARE_VER_MINOR` can change between firmware releases (e.g. the
+v0.1.0 bump from 2.2 to 2.3) without any host-side coordination
+from ka9q.  The compatibility-matrix row for `TESTFX3` above
+reflects that it is *supported* by the firmware (returns a 4-byte
+response), not that it is *sent* by ka9q.
 
 ## Container-side requirements (no patches needed)
 
@@ -211,30 +245,25 @@ with "Error or device could not be found".  See §1 for the analysis.
 
 ## Patches applied in this container
 
-The patch set is intentionally minimal — one patch, for the one
-incompatibility that has no host-side or container-side workaround:
-
-`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch` —
-insert `command_send(...,STARTADC,samprate)` before `STARTFX3` in
-`rx888_start_rx` so SDDC's `GpifPreflightCheck()` passes (§8).
+**None as of v0.1.0.**  The only patch that ever shipped (patch 03 —
+inserting `STARTADC` before `STARTFX3`) was retired once the firmware
+began reporting Si5351 CLK0 state truthfully; see §8.  The disabled
+patch is preserved in-tree as
+`docker/ka9q-radio/patches/03-startadc-before-startfx3.patch.disabled`
+and is skipped by the Dockerfile's `*.patch` glob.  See
+`docker/ka9q-radio/patches/README.md` for the historical record.
 
 The findings in §1 (`sleep(1)`) and §2 (TUNERSTDBY) are documented
 above but do **not** become container patches: §1 has a working
 container-level workaround (the udev mount), and §2 is purely
-cosmetic.  Carrying patches we don't strictly need would dilute the
-single ask we make of the upstream maintainer.
-
-The Dockerfile applies the patch with `git apply --whitespace=nowarn`
-against the pinned SHA.  When upstream ka9q-radio merges an
-equivalent fix, bump `KA9Q_RADIO_SHA` and drop the patch.
+cosmetic.  Carrying patches we don't strictly need would dilute any
+future ask we make of the upstream maintainer.
 
 ## Open work
 
-- Confirm container streams continuously (>1 minute) with patch 03
-  applied and the udev mount present.  Initial confirmation:
-  container reaches "rx888 running" and starts streaming; long-run
-  stability not yet measured.
-- Submit patch 03 upstream to `ka9q/ka9q-radio` as the focused
-  STARTADC/STARTFX3 ordering fix.
+- Long-run streaming stability against the v0.1.0 container is not
+  yet measured.  Initial confirmation in v0.1.0 prep: container
+  reaches "rx888 running" and starts streaming without host-side
+  patches.
 - File issues for VHF support (firmware-side R82xx return) and the
   LED bit-position decision; both are non-blocking for HF receive.

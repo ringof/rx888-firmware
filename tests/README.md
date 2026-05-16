@@ -60,32 +60,80 @@ to bootloader first if needed).  Both use `rx888_stream` from the
 
 ### Automated test commands
 
-Each prints `PASS`/`FAIL` and exits 0/1:
+Each prints `PASS`/`FAIL` and exits 0/1.  Scenarios cluster into a
+few categories — a representative sample below; the canonical full
+list lives in the `cmd_table[]` at the top of
+`tests/fx3_cmd.c`, or run `./fx3_cmd debug` and type `!help` for
+the same list interactively.
+
+**EP0 / vendor-command boundaries:**
 
 ```
-./fx3_cmd ep0_overflow                  # wLength > 64 must STALL (#6)
-./fx3_cmd oob_brequest                  # bRequest=0xCC bounds check (#21)
-./fx3_cmd oob_setarg                    # SETARGFX3 wIndex=0xFFFF (#20)
-./fx3_cmd console_fill                  # 35 chars to 32-byte buffer (#13)
-./fx3_cmd debug_race                    # 50 rapid debug I/O cycles (#8)
-./fx3_cmd debug_poll                    # debug console "?" command (#26)
-./fx3_cmd pib_overflow                  # PIB error detection (#10)
-./fx3_cmd stack_check                   # stack watermark > 25% (#12)
+./fx3_cmd ep0_overflow                  # wLength > 64 must STALL
+./fx3_cmd oob_brequest                  # unknown bRequest STALLs
+./fx3_cmd oob_setarg                    # SETARGFX3 wIndex=0xFFFF
+./fx3_cmd ep0_stall_recovery            # EP0 stall then immediate use
+./fx3_cmd vendor_rqt_wrap               # counter wraparound at 256
+./fx3_cmd stale_vendor_codes            # dead-zone bRequest values
+./fx3_cmd setarg_gap_index              # near-miss SETARGFX3 wIndex
+./fx3_cmd ep0_hammer                    # 500 rapid EP0s during stream
+```
+
+**GPIF / streaming:**
+
+```
+./fx3_cmd stop_gpif_state               # GPIF SM lands in IDLE
+./fx3_cmd stop_start_cycle              # cycle STOP+START with data verify
+./fx3_cmd gpif_soft_stop                # soft-stop reaches IDLE (needs new waveform)
+./fx3_cmd stop_under_backpressure       # STOP while DMA buffers full
+./fx3_cmd sustained_stream              # continuous streaming check
+./fx3_cmd dma_count_monotonic           # DMA counter monotonic during stream
+./fx3_cmd dma_count_reset               # DMA counter reset on STARTFX3
+./fx3_cmd data_sanity                   # bulk-data corruption check
+```
+
+**Recovery validation:**
+
+```
+./fx3_cmd wedge_recovery                # DMA wedge + STOP+START recovery
+./fx3_cmd watchdog_cap_observe          # observe watchdog fault plateau
+./fx3_cmd watchdog_cap_restart          # restart after watchdog cap
+./fx3_cmd clock_pull                    # pull clock mid-stream, verify recovery
+./fx3_cmd test_health_recovery          # HANGFX3 + Level-4 EP0 reset round-trip
+./fx3_cmd test_main_recovery            # HANGMAIN + Level-5 HWDT round-trip
+./fx3_cmd abandoned_stream              # simulate host crash (no STOPFX3)
+```
+
+**Si5351 / ADC clock:**
+
+```
+./fx3_cmd pll_preflight                 # STARTFX3 rejected without PLL lock
+./fx3_cmd clk0_chip_query               # STARTFX3 STALLs after CLK0 power-down via I2CWFX3
+./fx3_cmd freq_hop                      # rapid ADC frequency hopping
+./fx3_cmd adc_freq_extremes             # edge ADC frequencies
+```
+
+**Diagnostics counters:**
+
+```
+./fx3_cmd stats                         # snapshot full GETSTATS
 ./fx3_cmd stats_i2c                     # I2C failure counter
 ./fx3_cmd stats_pib                     # PIB error counter
 ./fx3_cmd stats_pll                     # Si5351 PLL lock status
-./fx3_cmd stop_gpif_state               # GPIF SM stops correctly
-./fx3_cmd stop_start_cycle              # 5x STOP+START with data verify
-./fx3_cmd pll_preflight                 # STARTFX3 rejected without clock
-./fx3_cmd wedge_recovery                # DMA wedge + STOP+START recovery
-./fx3_cmd clock_pull                    # pull clock mid-stream, verify recovery
-./fx3_cmd freq_hop                      # rapid ADC frequency hopping
-./fx3_cmd ep0_stall_recovery            # EP0 stall then immediate use
-./fx3_cmd double_stop                   # back-to-back STOPFX3
-./fx3_cmd double_start                  # back-to-back STARTFX3
+./fx3_cmd stack_check                   # stack watermark > 25%
+```
+
+**Debug / I/O paths:**
+
+```
+./fx3_cmd console_fill                  # console-buffer fill behavior
+./fx3_cmd debug_race                    # rapid debug I/O cycles
+./fx3_cmd debug_poll                    # debug console "?" command
+./fx3_cmd readinfodebug_flood           # debug buffer flood without drain
+./fx3_cmd debug_cmd_while_stream        # debug command during streaming
 ./fx3_cmd i2c_under_load                # I2C read while streaming
-./fx3_cmd sustained_stream              # 30s continuous streaming check
-./fx3_cmd abandoned_stream              # simulate host crash (no STOPFX3)
+./fx3_cmd i2c_write_bad_addr            # I2C write NACK counter
+./fx3_cmd i2c_multibyte                 # multi-byte I2C round-trip
 ```
 
 ### Consumer-failure tests
@@ -187,6 +235,11 @@ shutdown with a full summary.
 
 # 8-hour overnight run
 ./fx3_cmd soak 8
+
+# Bias the rotation: surface a specific scenario faster by cranking
+# its weight (--weight / -w NAME=N, repeatable, max 32 overrides).
+./fx3_cmd soak 1 42 --weight test_health_recovery=20 \
+                    --weight test_main_recovery=20
 ```
 
 Output includes a status line every 10 cycles and a final table:
@@ -224,10 +277,17 @@ Handles firmware upload and device probe before invoking `fx3_cmd soak`.
                        loaded firmware handles stress correctly.
 ```
 
+Per-scenario weight overrides (`--weight NAME=N`) are not forwarded
+by this wrapper — for biased rotations, invoke `./fx3_cmd soak`
+directly.
+
 ## fw_test.sh -- Automated TAP Test Suite
 
-Runs the full test suite (30 tests, 33 with streaming) in TAP format.
-Handles firmware upload automatically via `rx888_stream`.
+Runs an end-to-end firmware test suite in TAP format: firmware
+upload, device probe, all stale-command / OOB / debug-path / GPIF
+checks, GETSTATS counter validation, watchdog and stop/start
+cycles, and (optionally) a live streaming capture.  Handles
+firmware upload automatically via `rx888_stream`.
 
 ```
 ./fw_test.sh --firmware ../SDDC_FX3/SDDC_FX3.img
@@ -252,13 +312,20 @@ Handles firmware upload automatically via `rx888_stream`.
 ### Example output
 
 ```
-1..30
+1..N
 ok 1 - firmware upload (PID 0x00F1)
 ok 2 - device probe (hwconfig=0x04)
 ok 3 - GPIO set LED_BLUE
 ...
-ok 30 - GETSTATS PIB counter > 0
+ok N - stream: non-zero data present
+#
+# N passed, 0 failed out of N tests
 ```
+
+`N` is set by the `PLANNED` counter at the top of `fw_test.sh` and
+varies as scenarios are added.  Each block in the script prints
+`ok` or `not ok` for one numbered TAP entry; the streaming test at
+the end contributes a few additional sub-assertions.
 
 ## File map
 

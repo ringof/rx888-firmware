@@ -3,10 +3,16 @@
 [![Latest release](https://img.shields.io/github/v/release/ringof/rx888-firmware?include_prereleases&label=latest%20release)](https://github.com/ringof/rx888-firmware/releases/latest)
 [![Build](https://github.com/ringof/rx888-firmware/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ringof/rx888-firmware/actions/workflows/build.yml?query=branch%3Amain)
 
-Cypress FX3 USB controller firmware for the **RX888 mk2** (also written
-RX888mk2) direct-sampling SDR receiver. HF reception (0–32 MHz) via the
-on-board LTC2208 ADC; the R828D VHF tuner is detected but not driven by
-the firmware (see Limitations).
+**Documentation:** [ringof.github.io/rx888-firmware](https://ringof.github.io/rx888-firmware/) — USB API reference, GPIO map, host-application compatibility, and architecture notes.
+
+Open-source Cypress FX3 firmware for the **RX888 mk2** (also written
+RX888mk2) direct-sampling SDR receiver.  If you're about to write FX3
+firmware for an SDR — USB vendor-command protocol, GPIF II state
+machine, DMA pipeline, Si5351 clock control, ka9q-radio compatibility,
+recovery cascade with streaming watchdog and FX3 hardware-watchdog
+backstop — start here, not from scratch.  HF reception 0–32 MHz via
+the on-board LTC2208 ADC; the R828D VHF tuner is detected but not
+driven by the firmware (see Limitations).
 
 ## Compatible host applications
 
@@ -114,8 +120,8 @@ Recovery is owned by a single module — `SDDC_FX3/health.c` — that
 collects liveness signals from across the firmware and applies a
 documented cascade of remedies when the device is unhealthy.  This
 section describes the architecture and the implementation status of
-each cascade level.  See `PLAN_RECOVERY.md` at the repo root for the
-design rationale and PR sequencing.
+each cascade level.  See `docs/archive/PLAN_RECOVERY.md` for the
+original design rationale and PR sequencing.
 
 ### Health interface
 
@@ -143,7 +149,7 @@ a new evaluation branch — not writing a new watchdog.
 
 | Level | Remedy | Appropriate for | Latency | Status |
 |---|---|---|---|---|
-| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` per `PLAN_RECOVERY.md` §5 PR N) |
+| 1 | Soft-stop FW_TRG + `DmaMultiChannelReset` + `GpifSMStart` | Streaming wedge | ~300 ms | **Implemented** (existing watchdog in `RunApplication.c`; pending migration into `health_recover()` — issue #115) |
 | 2 | EP0 stall+unstall + `FlushEp` on EP1 | EP0 stuck state | ~10 ms | **Not implemented yet** |
 | 3 | `StopApplication` + `StartApplication` | Application-level state corruption | ~100 ms | **Not implemented yet** |
 | 4 | `CyU3PDeviceReset(CyFalse)` | Vendor-handler hang (EP0 thread deadlocked in an SDK call) | full re-enumeration (~1-2 s) | **Implemented** in `health_recover(HEALTH_WEDGED_EP0)` (#104, #105).  Validated end-to-end by `test_health_recovery` (HANGFX3). |

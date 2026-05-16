@@ -1,5 +1,9 @@
 # PLAN — GitHub Pages site for rx888-firmware
 
+> **Status: archived.**  This plan shipped in PR #121.  The site is
+> live at https://ringof.github.io/rx888-firmware/ and the source
+> lives under `docs/`.  This document is preserved for design rationale.
+
 ## Goal
 
 Stand up a public project page at
