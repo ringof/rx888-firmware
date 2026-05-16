@@ -66,6 +66,11 @@ static CyU3PReturnStatus_t synth_pps_commit_once(void)
     /* Both sockets refused.  Channel is between buffers, was reset,
      * or hit a transient state.  Count the miss but don't escalate —
      * the next tick should normally land. */
+    /* INSTRUMENTATION (issue #125): surface the SetWrapUp return codes
+     * via the USB debug channel so the host can drain them with
+     * `fx3_cmd debug_poll`.  Helps diagnose why both sockets refuse.
+     * Revert before the next non-investigation commit. */
+    DebugPrint(4, "\r\nSYNTH_PPS\twrap fail s0=0x%02X s1=0x%02X", s0, s1);
     glPpsCommitFailCount++;
     return s0;
 }
