@@ -56,47 +56,26 @@ static CyU3PReturnStatus_t synth_pps_commit_once(void)
     }
 
     /* Try producer socket 0 first; if it errors (= the other socket
-     * is the active one or the channel mutex is contended), try
-     * socket 1.  Exactly one is filling at any instant in ping-pong,
-     * so first-success is correct.
-     *
-     * MUTEX_FAILURE retry (issue #125): hardware shows that during
-     * continuous streaming the DMA engine holds the channel mutex
-     * for the entire buffer-fill cycle (~128 us at 64 MS/s) and a
-     * single SetWrapUp attempt from this timer thread loses the race
-     * 100 % of the time (return code 0x1D).  Retry up to 8 times in
-     * a tight loop -- no CyU3PThreadSleep here because sleeping in
-     * the ThreadX timer task would delay every other timer in the
-     * system (including HWDT pet).  Tight retries take ~1-2 us total
-     * and bet on catching one of the engine's brief mutex-release
-     * windows between buffer transitions.
-     *
-     * This is a hack.  The documented path for partial commits on
-     * AUTO_MANY_TO_ONE channels during streaming is the consumer-
-     * suspend + CommitBuffer dance (cyu3dma.h CY_U3P_DMA_SCK_SUSP_
-     * CONS_PARTIAL_BUF + CyU3PDmaMultiChannelCommitBuffer).  See
-     * the follow-up issue tracking the proper Option 2 rewrite. */
-    CyU3PReturnStatus_t s0 = CY_U3P_ERROR_MUTEX_FAILURE;
-    CyU3PReturnStatus_t s1 = CY_U3P_ERROR_MUTEX_FAILURE;
-    for (int attempt = 0; attempt < 8; attempt++) {
-        s0 = CyU3PDmaMultiChannelSetWrapUp(
+     * is the active one), try socket 1.  Exactly one is filling at
+     * any instant in ping-pong, so first-success is correct. */
+    CyU3PReturnStatus_t s0 = CyU3PDmaMultiChannelSetWrapUp(
                                 &glMultiChHandleSlFifoPtoU, 0);
-        glPpsLastWrapS0 = (uint8_t)s0;  /* INSTRUMENTATION (#125) */
-        if (s0 == CY_U3P_SUCCESS) {
-            glPpsCount++;
-            return CY_U3P_SUCCESS;
-        }
-        s1 = CyU3PDmaMultiChannelSetWrapUp(
+    glPpsLastWrapS0 = (uint8_t)s0;  /* INSTRUMENTATION (#125), see header */
+    if (s0 == CY_U3P_SUCCESS) {
+        glPpsCount++;
+        return CY_U3P_SUCCESS;
+    }
+    CyU3PReturnStatus_t s1 = CyU3PDmaMultiChannelSetWrapUp(
                                 &glMultiChHandleSlFifoPtoU, 1);
-        glPpsLastWrapS1 = (uint8_t)s1;  /* INSTRUMENTATION (#125) */
-        if (s1 == CY_U3P_SUCCESS) {
-            glPpsCount++;
-            return CY_U3P_SUCCESS;
-        }
+    glPpsLastWrapS1 = (uint8_t)s1;  /* INSTRUMENTATION (#125), see header */
+    if (s1 == CY_U3P_SUCCESS) {
+        glPpsCount++;
+        return CY_U3P_SUCCESS;
     }
 
-    /* All retries on both sockets refused.  Count the miss; the
-     * next tick will try again from scratch. */
+    /* Both sockets refused.  Channel is between buffers, was reset,
+     * or hit a transient state.  Count the miss but don't escalate —
+     * the next tick should normally land. */
     glPpsCommitFailCount++;
     return s0;
 }
