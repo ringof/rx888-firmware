@@ -54,6 +54,10 @@
 #define TUNERINIT     0xB4
 #define TUNERTUNE     0xB5
 #define SETARGFX3     0xB6
+#define SYNTH_PPS     0xB7   /* DIAGNOSTIC: software-driven in-band PPS marker
+                              * (issue #125).  wValue: 0=stop, 1=start at
+                              * wIndex ms (0->1000 default; 10..60000 valid),
+                              * 2=oneshot.  Out-of-range STALLs. */
 #define TUNERSTDBY    0xB8
 #define READINFODEBUG 0xBA
 #define HANGFX3       0xCE   /* TEST-ONLY: sleep wValue ms in EP0 handler;
@@ -521,6 +525,7 @@ static int do_test_sustained_stream(libusb_device_handle *h);
 static int do_test_abandoned_stream(libusb_device_handle *h);
 static int do_test_vendor_rqt_wrap(libusb_device_handle *h);
 static int do_test_stale_vendor_codes(libusb_device_handle *h);
+static int do_test_synth_pps_protocol(libusb_device_handle *h);
 static int do_test_setarg_gap_index(libusb_device_handle *h);
 static int do_test_gpio_extremes(libusb_device_handle *h);
 static int do_test_hw_smoke(libusb_device_handle *h);
@@ -577,6 +582,7 @@ static const struct local_cmd_entry local_cmds_noarg[] = {
     {"abandoned_stream", do_test_abandoned_stream},
     {"vendor_rqt_wrap",  do_test_vendor_rqt_wrap},
     {"stale_vendor_codes", do_test_stale_vendor_codes},
+    {"synth_pps_protocol", do_test_synth_pps_protocol},
     {"setarg_gap_index", do_test_setarg_gap_index},
     {"gpio_extremes",    do_test_gpio_extremes},
     {"hw_smoke",         do_test_hw_smoke},
@@ -627,6 +633,7 @@ static void print_local_help(void)
            "  abandoned_stream              Simulate host crash (no STOPFX3)\n"
            "  vendor_rqt_wrap               Counter wraparound at 256\n"
            "  stale_vendor_codes            Dead-zone bRequest values\n"
+           "  synth_pps_protocol            SYNTH_PPS argument-validation stub (issue #125)\n"
            "  setarg_gap_index              Near-miss SETARGFX3 wIndex\n"
            "  gpio_extremes                 Extreme GPIO patterns\n"
            "  hw_smoke                      ADC alive check (stream after GPIO)\n"
@@ -3096,11 +3103,13 @@ static int do_test_vendor_rqt_wrap(libusb_device_handle *h)
 }
 
 /* T2: stale_vendor_codes — send dead-zone bRequest values that have no
- * handler.  0xB0, 0xB7, 0xB9 are between valid codes.  All should STALL.
- * (0xB3 = GETSTATS is valid, so excluded.) */
+ * handler.  0xB0 and 0xB9 are between valid codes.  Both should STALL.
+ * (0xB3 = GETSTATS is valid, so excluded.  0xB7 was previously in this
+ * list but is now claimed by SYNTH_PPS — issue #125 — and has its own
+ * dedicated test in do_test_synth_pps_protocol.) */
 static int do_test_stale_vendor_codes(libusb_device_handle *h)
 {
-    static const uint8_t dead[] = {0xB0, 0xB7, 0xB9};
+    static const uint8_t dead[] = {0xB0, 0xB9};
     int ndead = (int)(sizeof(dead) / sizeof(dead[0]));
 
     for (int i = 0; i < ndead; i++) {
@@ -3126,6 +3135,74 @@ static int do_test_stale_vendor_codes(libusb_device_handle *h)
         return 1;
     }
     printf("PASS stale_vendor_codes: %d dead-zone codes all STALL\n", ndead);
+    return 0;
+}
+
+/* synth_pps_protocol — exercise the A2 stub for SYNTH_PPS (issue #125).
+ * Each row is (wValue, wIndex, expect_ack).  The firmware stub:
+ *   wValue=0           -> stop                          ACK
+ *   wValue=1 wIndex=0  -> start, default 1000 ms        ACK
+ *   wValue=1 wIndex N  -> start, period N ms;
+ *                         ACK if 10 <= N <= 60000,
+ *                         STALL otherwise
+ *   wValue=2           -> oneshot                       ACK
+ *   wValue >= 3        -> invalid action                STALL
+ * After all sub-cases the device must still respond to TESTFX3 — STALLs
+ * on EP0 must not wedge the endpoint. */
+static int do_test_synth_pps_protocol(libusb_device_handle *h)
+{
+    struct {
+        uint16_t wValue;
+        uint16_t wIndex;
+        int      expect_ack;   /* 1 = ACK expected, 0 = STALL expected */
+        const char *label;
+    } cases[] = {
+        { 0,     0,    1, "stop"                          },
+        { 1,     0,    1, "start default (wIndex=0 -> 1000ms)" },
+        { 1,  1000,    1, "start 1000 ms (nominal)"       },
+        { 1,    10,    1, "start 10 ms (min boundary)"    },
+        { 1, 60000,    1, "start 60000 ms (max boundary)" },
+        { 1,     5,    0, "start 5 ms (below min)"        },
+        { 1, 60001,    0, "start 60001 ms (above max)"    },
+        { 2,     0,    1, "oneshot"                       },
+        { 3,     0,    0, "invalid action 3"              },
+        { 255,   0,    0, "invalid action 255"            },
+    };
+    int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
+
+    for (int i = 0; i < ncases; i++) {
+        int r = libusb_control_transfer(h,
+                    LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE |
+                        LIBUSB_ENDPOINT_OUT,
+                    SYNTH_PPS,
+                    cases[i].wValue, cases[i].wIndex,
+                    NULL, 0,
+                    CTRL_TIMEOUT_MS);
+        int acked = (r == 0);
+        int stalled = (r == LIBUSB_ERROR_PIPE);
+
+        if (cases[i].expect_ack && !acked) {
+            printf("FAIL synth_pps_protocol: '%s' expected ACK, got %s\n",
+                   cases[i].label, libusb_strerror(r));
+            return 1;
+        }
+        if (!cases[i].expect_ack && !stalled) {
+            printf("FAIL synth_pps_protocol: '%s' expected STALL, got %s\n",
+                   cases[i].label, acked ? "ACK" : libusb_strerror(r));
+            return 1;
+        }
+    }
+
+    /* Verify EP0 still alive after the STALL cases */
+    uint8_t info[4] = {0};
+    int r = ctrl_read(h, TESTFX3, 0, 0, info, 4);
+    if (r < 0) {
+        printf("FAIL synth_pps_protocol: device unresponsive after STALLs: %s\n",
+               libusb_strerror(r));
+        return 1;
+    }
+    printf("PASS synth_pps_protocol: %d cases (ACK and STALL paths, EP0 alive)\n",
+           ncases);
     return 0;
 }
 
@@ -4597,6 +4674,7 @@ static int soak_main(libusb_device_handle **h_inout, int argc, char **argv)
         {"debug_while_stream",  do_test_debug_while_streaming,3, 0, 0, 0},
         {"abandoned_stream",    do_test_abandoned_stream,    15, 0, 0, 0},
         {"stale_vendor_codes",  do_test_stale_vendor_codes,   3, 0, 0, 0},
+        {"synth_pps_protocol",  do_test_synth_pps_protocol,   3, 0, 0, 0},
         {"setarg_gap_index",    do_test_setarg_gap_index,     3, 0, 0, 0},
         {"dma_count_reset",     do_test_dma_count_reset,      5, 0, 0, 0},
         {"dma_count_monotonic", do_test_dma_count_monotonic,  5, 0, 0, 0},
@@ -5573,6 +5651,9 @@ int main(int argc, char **argv)
 
     } else if (strcmp(cmd, "stale_vendor_codes") == 0) {
         rc = do_test_stale_vendor_codes(h);
+
+    } else if (strcmp(cmd, "synth_pps_protocol") == 0) {
+        rc = do_test_synth_pps_protocol(h);
 
     } else if (strcmp(cmd, "setarg_gap_index") == 0) {
         rc = do_test_setarg_gap_index(h);

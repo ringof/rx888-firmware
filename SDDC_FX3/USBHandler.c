@@ -489,8 +489,46 @@ CyFxSlFifoApplnUSBSetupCB (
 					isHandled = CyTrue;
 					break;
 
+				/* DIAGNOSTIC: software-driven in-band PPS marker (issue #125).
+				 * A2 -- stub only: validates arguments and ACKs.  The actual
+				 * timer + CyU3PDmaMultiChannelSetWrapUp() plumbing lands in A3.
+				 * Argument validation here keeps the protocol surface honest
+				 * so A3 can be added with no host-side rework. */
+				case SYNTH_PPS:
+					switch (wValue) {
+						case 0: /* stop */
+							DebugPrint(4, "\r\nSYNTH_PPS\tstop");
+							CyU3PUsbAckSetup();
+							isHandled = CyTrue;
+							break;
+						case 1: /* start */
+							{
+								uint16_t period_ms = (wIndex == 0) ? 1000 : wIndex;
+								if (period_ms >= 10 && period_ms <= 60000) {
+									DebugPrint(4, "\r\nSYNTH_PPS\tstart period=%ums", period_ms);
+									CyU3PUsbAckSetup();
+								} else {
+									DebugPrint(4, "\r\nSYNTH_PPS\tSTALL period=%u out of range", period_ms);
+									CyU3PUsbStall(0, CyTrue, CyFalse);
+								}
+								isHandled = CyTrue;
+							}
+							break;
+						case 2: /* oneshot */
+							DebugPrint(4, "\r\nSYNTH_PPS\toneshot");
+							CyU3PUsbAckSetup();
+							isHandled = CyTrue;
+							break;
+						default:
+							DebugPrint(4, "\r\nSYNTH_PPS\tSTALL action=%u", wValue);
+							CyU3PUsbStall(0, CyTrue, CyFalse);
+							isHandled = CyTrue;
+							break;
+					}
+					break;
 
-	   case READINFODEBUG:
+
+   case READINFODEBUG:
 					{
 					if (wValue >0)
 					{

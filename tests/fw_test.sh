@@ -511,6 +511,16 @@ output=$(run_cmd stale_vendor_codes) && {
 }
 
 # ==================================================================
+# 20a. SYNTH_PPS argument validation (issue #125, A2 stub)
+# ==================================================================
+
+output=$(run_cmd synth_pps_protocol) && {
+    tap_ok "synth_pps_protocol: SYNTH_PPS argument validation (issue #125)"
+} || {
+    tap_fail "synth_pps_protocol: SYNTH_PPS protocol surface broken" "$output"
+}
+
+# ==================================================================
 # 21. SETARGFX3 near-miss wIndex values
 # ==================================================================
 
