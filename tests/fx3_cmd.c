@@ -1338,12 +1338,12 @@ static int do_test_stack_check(libusb_device_handle *h)
  *   [15..18] uint32  Streaming fault count (EP underruns + watchdog recoveries)
  *   [19]     uint8   Si5351 status register (reg 0)
  */
-#define GETSTATS_LEN  34    /* bumped from 26 in synth_pps PR (issue #125) —
-                             * adds pps_count [26..29] and
-                             * pps_commit_fail_count [30..33] diagnostic
-                             * counters.  Strict-length check below means
-                             * flashing the new firmware is required after
-                             * this host update. */
+#define GETSTATS_LEN  36    /* INSTRUMENTATION (issue #125): temporarily
+                             * bumped 34 -> 36 to expose
+                             * glPpsLastWrapS0 [34] and glPpsLastWrapS1 [35]
+                             * so the host can read which SetWrapUp error
+                             * code commit_once is hitting.  Revert to 34
+                             * before A3 mechanism fix lands. */
 
 struct fx3_stats {
     uint32_t dma_count;
@@ -1367,6 +1367,10 @@ struct fx3_stats {
     uint32_t pps_commit_fail_count; /* Wrap-up attempts where both producer
                                      * sockets refused (= streaming idle or
                                      * channel between buffers). */
+    uint8_t  pps_last_wrap_s0; /* INSTRUMENTATION (#125): last CyU3PReturnStatus_t
+                                * from SetWrapUp on producer socket 0. */
+    uint8_t  pps_last_wrap_s1; /* INSTRUMENTATION (#125): last CyU3PReturnStatus_t
+                                * from SetWrapUp on producer socket 1. */
 };
 
 static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
@@ -1387,6 +1391,8 @@ static int read_stats(libusb_device_handle *h, struct fx3_stats *s)
     s->clk0_result = buf[25];
     memcpy(&s->pps_count,             &buf[26], 4);
     memcpy(&s->pps_commit_fail_count, &buf[30], 4);
+    s->pps_last_wrap_s0 = buf[34];
+    s->pps_last_wrap_s1 = buf[35];
     return 0;
 }
 
@@ -1399,11 +1405,12 @@ static int do_stats(libusb_device_handle *h)
         printf("FAIL stats: %s\n", libusb_strerror(r));
         return 1;
     }
-    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u pps=%u pps_fail=%u\n",
+    printf("PASS stats: dma=%u gpif=%u pib=%u last_pib=0x%04X i2c=%u faults=%u pll=0x%02X boot=%u clk0_reg16=0x%02X clk0_result=%u pps=%u pps_fail=%u s0=0x%02X s1=0x%02X\n",
            s.dma_count, s.gpif_state, s.pib_errors,
            s.last_pib_arg, s.i2c_failures, s.streaming_faults,
            s.si5351_status, s.boot_count, s.clk0_reg16, s.clk0_result,
-           s.pps_count, s.pps_commit_fail_count);
+           s.pps_count, s.pps_commit_fail_count,
+           s.pps_last_wrap_s0, s.pps_last_wrap_s1);
     return 0;
 }
 

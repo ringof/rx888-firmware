@@ -34,6 +34,14 @@ extern CyBool_t glIsApplnActive;
 uint32_t glPpsCount = 0;
 uint32_t glPpsCommitFailCount = 0;
 
+/* INSTRUMENTATION (issue #125): last CyU3PReturnStatus_t returned by
+ * the two CyU3PDmaMultiChannelSetWrapUp calls in commit_once.  Surfaced
+ * via GETSTATS so the host can read which SDK error path we're hitting
+ * (DebugPrint from CyU3PTimer callback context is silently dropped —
+ * stack constraints).  Revert before the actual A3 mechanism fix. */
+uint8_t glPpsLastWrapS0 = 0xFF;
+uint8_t glPpsLastWrapS1 = 0xFF;
+
 static CyU3PTimer glSynthPpsTimer;
 static CyBool_t   glSynthPpsTimerCreated = CyFalse;
 
@@ -52,12 +60,14 @@ static CyU3PReturnStatus_t synth_pps_commit_once(void)
      * any instant in ping-pong, so first-success is correct. */
     CyU3PReturnStatus_t s0 = CyU3PDmaMultiChannelSetWrapUp(
                                 &glMultiChHandleSlFifoPtoU, 0);
+    glPpsLastWrapS0 = (uint8_t)s0;  /* INSTRUMENTATION (#125), see header */
     if (s0 == CY_U3P_SUCCESS) {
         glPpsCount++;
         return CY_U3P_SUCCESS;
     }
     CyU3PReturnStatus_t s1 = CyU3PDmaMultiChannelSetWrapUp(
                                 &glMultiChHandleSlFifoPtoU, 1);
+    glPpsLastWrapS1 = (uint8_t)s1;  /* INSTRUMENTATION (#125), see header */
     if (s1 == CY_U3P_SUCCESS) {
         glPpsCount++;
         return CY_U3P_SUCCESS;
@@ -66,11 +76,6 @@ static CyU3PReturnStatus_t synth_pps_commit_once(void)
     /* Both sockets refused.  Channel is between buffers, was reset,
      * or hit a transient state.  Count the miss but don't escalate —
      * the next tick should normally land. */
-    /* INSTRUMENTATION (issue #125): surface the SetWrapUp return codes
-     * via the USB debug channel so the host can drain them with
-     * `fx3_cmd debug_poll`.  Helps diagnose why both sockets refuse.
-     * Revert before the next non-investigation commit. */
-    DebugPrint(4, "\r\nSYNTH_PPS\twrap fail s0=0x%02X s1=0x%02X", s0, s1);
     glPpsCommitFailCount++;
     return s0;
 }

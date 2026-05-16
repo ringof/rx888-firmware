@@ -63,4 +63,15 @@ CyU3PReturnStatus_t synth_pps_oneshot(void);
 extern uint32_t glPpsCount;
 extern uint32_t glPpsCommitFailCount;
 
+/* INSTRUMENTATION (issue #125): last CyU3PReturnStatus_t returned by
+ * each of the two CyU3PDmaMultiChannelSetWrapUp calls in commit_once.
+ * Surfaced via GETSTATS (offsets 34, 35) so the host can see which
+ * SDK error path we're hitting -- DebugPrint from CyU3PTimer callback
+ * context is silently dropped (timer thread stack too small for
+ * DebugPrint2USB's 256-byte scratch buf).  Revert these globals,
+ * their GETSTATS slots, and host-side decoding before the actual
+ * A3 mechanism fix lands. */
+extern uint8_t glPpsLastWrapS0;
+extern uint8_t glPpsLastWrapS1;
+
 #endif /* _INCLUDED_SYNTH_PPS_H_ */

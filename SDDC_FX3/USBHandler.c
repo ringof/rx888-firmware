@@ -293,6 +293,11 @@ CyFxSlFifoApplnUSBSetupCB (
 					off += 4;
 					memcpy(&glEp0Buffer[off], &glPpsCommitFailCount, 4); /* [30..33] */
 					off += 4;
+					/* INSTRUMENTATION (issue #125): last SetWrapUp return
+					 * codes from the timer's commit_once.  Bumps reply from
+					 * 34 to 36 bytes.  Revert before A3 fix. */
+					glEp0Buffer[off++] = glPpsLastWrapS0;                /* [34] */
+					glEp0Buffer[off++] = glPpsLastWrapS1;                /* [35] */
 					CyU3PUsbSendEP0Data(off, glEp0Buffer);
 					isHandled = CyTrue;
 				}
