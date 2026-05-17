@@ -545,8 +545,9 @@ endpoint zero.  The host sends a SETUP packet with a vendor-specific
 | 0xAF | I2CRFX3 | IN | I2C addr | reg addr | N B | Read N bytes from I2C device |
 | 0xB1 | RESETFX3 | OUT | -- | -- | 0 B | Warm-reset the FX3; device disconnects and returns to bootloader |
 | 0xB2 | STARTADC | OUT | -- | -- | 4 B | Set ADC sampling clock; payload is frequency in Hz, programs Si5351 PLL A / CLK0; STALLs EP0 if Si5351 I2C fails |
-| 0xB3 | GETSTATS | IN | 0 | 0 | 26 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1).  See [api.md §GETSTATS](api.md) for the canonical layout. |
+| 0xB3 | GETSTATS | IN | 0 | 0 | 34 B | Read diagnostic counters: DMA count (4), GPIF state (1), PIB errors (4), last PIB arg (2), I2C failures (4), streaming faults (4), Si5351 status (1), boot count (4), Si5351 CLK0_CONTROL (1), clk0_result (1), synth-PPS commit count (4), synth-PPS commit-fail count (4).  See [api.md §GETSTATS](api.md) for the canonical layout. |
 | 0xB6 | SETARGFX3 | OUT | value | arg_id | N B | Set hardware parameter; arg_id 10 = PE4304 attenuator (0-63), arg_id 11 = AD8370 VGA (0-255), arg_id 14 = `WDG_MAX_RECOV` watchdog recovery cap |
+| 0xB7 | SYNTH_PPS | OUT | action | period_ms | 0 B | **Diagnostic, permanent.** Software-driven in-band PPS marker (issue #125).  `wValue=0` stops, `wValue=1` starts at `wIndex` ms (0 → 1000 default; 10..60000 range), `wValue=2` fires one-shot.  Counts visible in `GETSTATS`. |
 | 0xBA | READINFODEBUG | IN | char | -- | ≤ 64 B | Debug console: wValue carries one input character (0 = none); response is buffered debug output (STALL if empty) |
 | 0xCE | HANGFX3 | OUT | sleep ms | -- | 0 B | **Test-only.** Sleeps `wValue` ms inside the EP0 handler to deterministically wedge the vendor callback; used by `test_health_recovery` to validate the Level-4 EP0 watchdog. |
 | 0xCF | HANGMAIN | OUT | -- | -- | 0 B | **Test-only.** Sets a flag that causes the main loop to spin forever on its next iteration; used by `test_main_recovery` to validate the Level-5 FX3 HWDT backstop. |

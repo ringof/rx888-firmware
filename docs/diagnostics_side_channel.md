@@ -82,6 +82,8 @@ and alignment ambiguity on the ARM926EJ-S target.
 | 20--23 | 4    | `boot_count`           | *(not in proposal)* | **Implemented** (per-boot counter for mid-test reset detection) |
 | 24     | 1    | Si5351 CLK0_CONTROL (reg 16) | *(not in proposal)* | **Implemented** (live read; bit 7 = CLK0_PDN) |
 | 25     | 1    | `clk0_result`          | *(not in proposal)* | **Implemented** (`si5351_clk0_enabled()`; same value `GpifPreflightCheck()` consults) |
+| 26--29 | 4    | `glPpsCount`           | *(not in proposal)* | **Implemented** (synthetic-PPS successful partial-commit count; issue #125) |
+| 30--33 | 4    | `glPpsCommitFailCount` | *(not in proposal)* | **Implemented** (wrap-up attempts where both producer sockets refused; issue #125) |
 
 **Not yet implemented** from the original proposal:
 
@@ -152,13 +154,13 @@ count) as a superset.
 
 ### Chosen: New vendor command via EP0 (Option A)
 
-**Implemented as GETSTATS (`0xB3`), 26 bytes.**  This follows Option A
+**Implemented as GETSTATS (`0xB3`), 34 bytes.**  This follows Option A
 from the original proposal — a dedicated vendor request returning
 diagnostic counters via EP0, independent of the bulk data stream.
 
 ```
-Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=26, direction=IN
-FX3 returns: 26 bytes, packed little-endian (see api.md §GETSTATS for
+Host sends:  bRequest=0xB3, wValue=0, wIndex=0, wLength=34, direction=IN
+FX3 returns: 34 bytes, packed little-endian (see api.md §GETSTATS for
              the canonical layout, or SDDC_FX3/docs/debugging.md §6
              for the firmware-side view)
 ```

@@ -23,6 +23,17 @@ enum FX3Command {
     GETSTATS      = 0xB3,   /* Read diagnostic counters (read-only) */
     SETARGFX3     = 0xB6,   /* Set argument by index/value */
     READINFODEBUG = 0xBA,   /* Read debug output / send debug input */
+    SYNTH_PPS     = 0xB7,   /* DIAGNOSTIC: software-driven in-band PPS marker.
+                             * wValue selects the action:
+                             *   0 -- stop the synthetic-PPS timer
+                             *   1 -- start at wIndex ms period
+                             *        (wIndex==0 -> default 1000 ms;
+                             *         accepted range otherwise 10..60000)
+                             *   2 -- fire one immediate partial-commit (one-shot)
+                             * Accepted calls ACK; out-of-range arguments STALL.
+                             * Issue #125 -- permanent diagnostic, safe in
+                             * production.  Slot 0xB7 was previously unused
+                             * (never assigned to any prior command). */
     HANGFX3       = 0xCE,   /* TEST-ONLY: sleep wValue ms in the EP0 handler
                              * to deterministically wedge the vendor callback.
                              * Used by tests/fx3_cmd.c test_health_recovery to
