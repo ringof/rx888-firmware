@@ -176,6 +176,36 @@ that can run nightly.
 By the time this lands, the operator has weeks of Phase 1.5 data
 and a Phase 2 baseline — the per-PR gate isn't a guess.
 
+### 7.4 If the bench is shared across multiple repos
+
+Decision point, not a commitment. If sibling repos (e.g. a
+`ka9q-radio` fork or a docker-image repo) need the same bench:
+
+- Register the runner at the **organization** level into a runner
+  group restricted to the specific repos that may use it.
+  Repo-scoped registration does not generalize and forces a later
+  migration.
+- Cross-repo serialization is the wrinkle: GitHub Actions
+  `concurrency:` groups do not span repositories. Two mitigations
+  used together: run exactly one runner process on the bench
+  machine, and wrap the test step in a host-side `flock` on a
+  fixed path (e.g. `/var/lock/rx888-bench.lock`). The mutex stays
+  correct even if the "one runner" invariant slips.
+- Tighten the trust surface: require approval for outside-collaborator
+  PR workflows in every repo that targets the bench group, and
+  consider a GitHub `Environment` with required reviewers on the
+  HITL job.
+- Never expose secrets to the bench job that the test does not
+  strictly need. Treat the bench host as if a malicious PR could
+  compromise it.
+- If any sharing repo is public, centralize via a private "bench"
+  repo invoked through `repository_dispatch`, so the public repo
+  never directly invokes the self-hosted runner.
+
+Revisit this subsection at two moments: just before Phase 3 wires
+the first runner (decide org-vs-repo registration then) and the
+first time a second repo asks for bench access.
+
 ## 8. Phase 4 (deferred, listed only)
 
 Out of scope for this plan; named here so contributors know where
