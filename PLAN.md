@@ -2,253 +2,145 @@
 
 ## 1. Goal
 
-Catch firmware-induced regressions to the RX888 RF chain without
-relying on a live operator test for every change. Most users of the
-RX888 run it for WSPR spotting, and the dominant failure mode of a
-firmware change is "the chain still works but it works *worse*." The
-harness must surface that class of regression cheaply enough to live
-in CI, so that "did WSPR performance change?" stops being a manual
-question.
-
-The HITL jig is nearly all USB-in / USB-out: a QRP Labs QDX
-transmits, fixed attenuators connect to the RX888 RF input, and both
-devices are USB to the host running the test container. From the
-operator's point of view, a successful run is one command in, one
-PASS line out.
+Catch firmware-induced regressions to the RX888 RF chain without a
+live operator test on every change. The dominant failure mode of a
+firmware change is "the chain still works but it works *worse*";
+this harness exists to surface that class of regression. Designed as
+nearly all USB-in / USB-out: one command in, one PASS line out.
 
 ## 2. Bench topology
 
 ```
    ┌──────────┐  USB2   ┌──────────────┐   USB3   ┌──────────┐
    │   QDX    │◄────────┤ host (docker)├─────────►│  RX888   │
-   │  (TX)    │  CAT    │  ka9q-radio  │ stream   │  (RX)    │
+   │  (TX)    │ CAT+aud │  ka9q-radio  │ stream   │  (RX)    │
    └────┬─────┘         │  wsprdaemon  │          └────┬─────┘
         │ RF out             HITLtest                  │ RF in
-        │                                              │
-        └─────► [attenuator chain, fixed dB] ──────────┘
+        └─────► [fixed attenuator pad] ────────────────┘
 ```
 
-- **TX side:** QDX over USB-serial (CAT only — its built-in WSPR
-  beacon mode is used, no audio injection in Phase 1).
-- **RX side:** RX888mk2 over USB3, streaming to `radiod`.
-- **RF link:** fixed attenuator pad between QDX RF out and RX888 RF
-  in. Open bench, no shielding — tolerance bands must accept ambient
-  QRM drift.
-- **Container:** existing `docker/ka9q-radio` image, extended with a
-  CAT helper and the `HITLtest` script.
+QDX exposes both USB-CDC serial (CAT) and USB audio. Container
+generates the WSPR/FT8/etc. audio, plays into the QDX's USB sound
+device, and asserts PTT/frequency via CAT. RX888 streams to
+`radiod`. Open bench, no shielding — tolerance bands accept ambient
+QRM drift.
 
 ## 3. Phase ladder
 
-| Phase | Deliverable | Effort | Gates on | Exit criterion |
-|-------|-------------|--------|----------|----------------|
-| 1 | Operator-run `HITLtest`, decode-or-not | ~1 day script + bench bring-up | nothing yet | Operator runs `HITLtest` on the bench, sees PASS on a known-good firmware and FAIL on a deliberately broken one |
-| 1.5 | CSV logger appends per-run SNR | ~½ day | nothing | Spot SNR recorded as a run artifact; weeks of data accumulate |
-| 2 | SNR-delta gate vs. empirical baseline | ~1 day once Phase 1.5 data exists | PR merge (operator-driven) | Tolerance bands set from real data; harness exits non-zero on regression |
-| 3 | CW tone + `radiod` status-multicast reader; self-hosted GH runner workflow | ~1–2 weeks | every PR touching firmware | Per-PR CI gate green on the bench runner |
-| 4 (deferred) | FT8 path, MDS sweep, IQ-domain metrics | unscoped | tighter assertions | Out of scope for this plan |
+| Phase | Deliverable | Effort | Exit criterion |
+|------:|-------------|--------|----------------|
+| 1   | Container has audio + CAT plumbing; WSPR round-trip via QDX, decode/no-decode | ~3 days | Operator runs `HITLtest`, PASS on good fw, FAIL with RF unplugged |
+| 1.5 | CSV log of wsprdaemon-reported SNR per PASS | ~½ day | Data accumulating from day one |
+| 1.7 | CW carrier subtest (CAT-only, reads `radiod` channel power) | ~1 day | Seconds-scale subtest works |
+| 1.8 | FT8 subtest (reuses Phase 1 audio plumbing, 15 s cadence) | ~½ day | FT8 round-trip works |
+| 2   | Empirical SNR-delta gate vs. baseline per mode | ~1 day once data exists | `HITLtest --gate` exits non-zero on regression |
+| 3   | Proper `radiod` status TLV→JSON reader + self-hosted CI runner workflow | ~1–2 weeks | Per-PR gate green on bench runner |
+| 4 (deferred) | MDS sweep, IQ-domain metrics | unscoped | — |
 
-The ordering is deliberate: ship the weak gate fast, accumulate data,
-let empirical tolerance set the stronger gate, then automate. Trust
-in the harness is built progressively — by the time the per-PR CI
-gate lands in Phase 3, the bench operator already knows what numbers
-to expect.
+The ordering is deliberate: ship the weakest gate fast, accumulate
+data, set tolerance empirically, then automate. Once the Phase 1
+audio path lands, every WSJT-family mode (WSPR/FT8/FT4/JS8/Q65/JT9)
+is roughly a free addition — only the WAV and cadence change.
 
-## 4. Phase 1 detail — operator-run `HITLtest`
+## 4. Phase 1 detail
 
-### 4.1 Container additions
+### 4.1 Container additions (`docker/ka9q-radio`)
 
-- Serial-port tooling (`socat`, basic `stty` already present) for
-  talking to the QDX's USB-CDC node.
-- A small CAT helper script (`qdx-cat.sh` or similar) wrapping the
-  specific CAT sequence needed to arm the QDX's built-in WSPR
-  beacon: set frequency, set callsign/grid/power if not already
-  provisioned in QDX EEPROM, select WSPR mode, arm next slot.
+- `alsa-utils` (`aplay`) for audio out to the QDX sound device.
+- A WSPR WAV generator (`wsprgen`/`WSPRcode` from the WSJT-X tree,
+  or pre-baked WAVs committed to `tests/hitl/wav/`).
+- `hamlib`'s `rigctl`, or a tiny direct-serial CAT helper for the
+  QDX's Kenwood-style protocol.
 - The `HITLtest` entrypoint script.
-- Documentation in `docker/ka9q-radio/README.md` covering: cable
-  layout, QDX provisioning prerequisites (callsign/grid/power
-  programmed once), and how to invoke `HITLtest`.
+- Updated README covering cabling, audio-device pinning via udev,
+  NTP requirement, and how to invoke.
 
 ### 4.2 Script flow
 
-`HITLtest` performs the following inside the running container:
+1. **Pre-flight.** Confirm RX888 enumerates, QDX serial + sound
+   devices present, host clock NTP-synced to within ~100 ms,
+   `radiod`/`wsprdaemon` running.
+2. **Generate.** Produce the WSPR WAV for the configured
+   callsign/grid/power (or use a pre-baked one).
+3. **Align + arm.** Wait for the next even UTC minute. Set
+   frequency via CAT, assert PTT.
+4. **Transmit.** `aplay` the WAV (~110.6 s) to the QDX sound
+   device. Release PTT on completion.
+5. **Decode wait.** Sleep ~70 s for wsprdaemon to process the slot.
+6. **Check.** Grep wsprdaemon's spot output for the expected
+   callsign in that slot.
+7. **Report.** Print `HITL PASS: ... SNR=<x> dB freq=<f>` or
+   `HITL FAIL: no decode for <call> in slot <utc>`. Exit 0/1.
 
-1. **Pre-flight.** Confirm the RX888 USB3 device enumerates and the
-   QDX serial node exists. Fail fast with a clear message naming the
-   missing device.
-2. **Stack check.** Confirm `radiod` is running with
-   `rx888-test.conf` and `wsprdaemon` is up. (Both are expected to
-   be started by the container's existing entrypoint; this is a
-   sanity check, not a launcher.)
-3. **Arm QDX.** Send the CAT sequence to set the test frequency
-   (e.g. 14.0956 MHz for 20 m WSPR), select WSPR beacon mode, and
-   arm transmission on the next even UTC minute.
-4. **Wait.** Sleep until the next even UTC minute, then sleep an
-   additional ~180 s (110.6 s TX duration + decoder slack).
-5. **Check decode.** Grep `wsprdaemon`'s spot output (path to be
-   confirmed during bring-up) for the QDX's provisioned callsign in
-   the expected slot.
-6. **Report.** Print exactly one of:
-   - `HITL PASS: TX sent, RX decoded "<call> <grid> <pwr>" SNR=<x> dB freq=<f>`
-   - `HITL FAIL: no decode for <call> in slot <utc>`
-7. **Exit** 0 on PASS, 1 on FAIL.
+### 4.3 Success criterion
 
-### 4.3 Phase 1 success criterion
+- On known-good firmware: `HITLtest` prints PASS.
+- With QDX powered off (or RF cable disconnected): prints FAIL
+  within the same wall-clock window.
 
-Two test runs on the bench, by the operator:
+No baseline file, no CI wiring yet.
 
-- On a known-good firmware image, `HITLtest` prints PASS.
-- With the QDX powered off (or RF cable disconnected), `HITLtest`
-  prints FAIL within the same wall-clock window.
+## 5. Phases 1.5 – 4 (one paragraph each)
 
-That's it. No CI wiring yet. No baseline file. No tolerance.
+**1.5 — Passive SNR logging.** `HITLtest` appends one CSV row per
+PASS: UTC, firmware SHA, mode, band, reported SNR, frequency
+offset. No gating change. Starts variance data accumulating
+immediately.
 
-## 5. Phase 1.5 — passive SNR logging
+**1.7 — CW carrier subtest.** Re-uses Phase 1 CAT plumbing without
+the audio path: set frequency, key down for 5 s via CAT, key up.
+Receiver side reads `radiod`'s status multicast for channel power /
+noise density / SNR at the carrier frequency. Seconds-scale subtest;
+becomes the per-PR CI gate at Phase 3.
 
-Add to `HITLtest`:
+**1.8 — FT8 subtest.** Same audio plumbing, different WAV (FT8 is
+12.6 s of audio in a 15 s slot). 8× the cycle cadence of WSPR —
+much better for any iterated testing.
 
-- On PASS, append one CSV row to `/var/log/hitl/runs.csv` (or a
-  similar path mounted as a volume) containing: UTC timestamp,
-  firmware git SHA (or build ID if available from a vendor command),
-  RF band, reported SNR, reported frequency offset.
-- No gating change. The exit code is still binary decode/no-decode.
+**2 — Baseline + gate.** Once Phase 1.5/1.7/1.8 have produced a few
+weeks of data across day/night, write `tests/hitl/baseline.json` with
+per-mode/per-band SNR mean and tolerance (e.g. mean − 2σ).
+`HITLtest --gate` exits non-zero on regression even if decode
+succeeded. `HITLtest --rebaseline` is a deliberate, human-invoked
+command. Never automatic.
 
-The point is to start accumulating real-world variance data the
-moment Phase 1 lands. Without this, Phase 2's tolerance band is a
-guess.
+**3 — Status reader + CI.** Replace 1.7's ad-hoc parser with a
+proper `radiod` status-multicast TLV→JSON tool (~100 lines).
+Register a self-hosted runner *org-level* into a runner group
+restricted to the specific repos that may use it. Workflow
+`.github/workflows/hitl.yml` pinned to `runs-on: [self-hosted,
+rx888-bench]`, gated by a GitHub Environment with required
+reviewers, with a `flock`-on-host mutex around the test step
+(GitHub `concurrency:` does not span repos). Pre-flight verifies
+hardware. Ephemeral runner mode. PR-gated for firmware changes;
+nightly cron runs the full WSPR path.
 
-## 6. Phase 2 — SNR-delta gate
+**4 (deferred) — Fancy.** MDS sweep via programmable attenuator,
+IQ-domain metrics (image rejection, spur survey) from `radiod` raw
+output. Each is its own plan.
 
-Once Phase 1.5 has produced enough rows (rough target: a few weeks of
-runs across day/night, ideally ≥ 50 samples on the primary test
-band):
+## 6. Open items and risks
 
-- Compute the empirical SNR distribution on the bench.
-- Write a baseline JSON file (`tests/hitl/baseline.json`) keyed by
-  band, recording expected SNR mean and the chosen tolerance (e.g.
-  mean − 2σ as the floor).
-- `HITLtest` gains a `--gate` flag: exits non-zero if measured SNR
-  falls below the floor, even if the decode succeeded.
-- Re-baselining is a separate explicit command (`HITLtest
-  --rebaseline`) that the operator runs deliberately. Never
-  automatic.
-
-Phase 2 is still operator-driven — the gate is "did the operator
-remember to run it before tagging." That's intentional; CI
-automation is Phase 3.
-
-## 7. Phase 3 — CW tone gate + CI runner
-
-Two deliverables, in this order:
-
-### 7.1 `radiod` status-multicast reader
-
-A small standalone tool that joins ka9q-radio's status multicast
-group, parses the TLV stream, and emits selected fields as JSON
-(noise density, baseband power, SNR, IF level, frequency offset).
-Approximately ~100 lines of C or Python. This is the "minimal
-commands to extract knowledge from ka9q-radio" the user identified
-earlier — no new DSP, just a structured view of what `radiod`
-already publishes.
-
-### 7.2 CW tone subtest
-
-Drive the QDX to emit a CW carrier at a known frequency and power.
-Configure `radiod` with a narrow channel on that frequency. Read the
-status stream for ~5 seconds. Assert that the reported channel SNR,
-noise density, and IF level fall within tolerance bands derived the
-same way as Phase 2 (empirical, from logged runs).
-
-This subtest takes seconds, not minutes. It becomes the per-PR CI
-gate. WSPR remains available as a slower full-protocol confirmation
-that can run nightly.
-
-### 7.3 CI wiring
-
-- Self-hosted GitHub Actions runner physically attached to the
-  bench, labelled `[self-hosted, rx888-bench]`.
-- Workflow `.github/workflows/hitl.yml` triggered on PRs that touch
-  `SDDC_FX3/**`, runs the container with `--device` passthrough for
-  both USB nodes, executes `HITLtest --quick` (CW-only path),
-  uploads the CSV row and any captured status JSON as artifacts.
-- Nightly cron job on the same runner runs the full WSPR test and
-  appends to the long-term log.
-
-By the time this lands, the operator has weeks of Phase 1.5 data
-and a Phase 2 baseline — the per-PR gate isn't a guess.
-
-### 7.4 If the bench is shared across multiple repos
-
-Decision point, not a commitment. If sibling repos (e.g. a
-`ka9q-radio` fork or a docker-image repo) need the same bench:
-
-- Register the runner at the **organization** level into a runner
-  group restricted to the specific repos that may use it.
-  Repo-scoped registration does not generalize and forces a later
-  migration.
-- Cross-repo serialization is the wrinkle: GitHub Actions
-  `concurrency:` groups do not span repositories. Two mitigations
-  used together: run exactly one runner process on the bench
-  machine, and wrap the test step in a host-side `flock` on a
-  fixed path (e.g. `/var/lock/rx888-bench.lock`). The mutex stays
-  correct even if the "one runner" invariant slips.
-- Tighten the trust surface: require approval for outside-collaborator
-  PR workflows in every repo that targets the bench group, and
-  consider a GitHub `Environment` with required reviewers on the
-  HITL job.
-- Never expose secrets to the bench job that the test does not
-  strictly need. Treat the bench host as if a malicious PR could
-  compromise it.
-- If any sharing repo is public, centralize via a private "bench"
-  repo invoked through `repository_dispatch`, so the public repo
-  never directly invokes the self-hosted runner.
-
-Revisit this subsection at two moments: just before Phase 3 wires
-the first runner (decide org-vs-repo registration then) and the
-first time a second repo asks for bench access.
-
-## 8. Phase 4 (deferred, listed only)
-
-Out of scope for this plan; named here so contributors know where
-later work fits:
-
-- FT8 audio path (WSJT-X inside the container, USB audio + CAT PTT
-  to the QDX, 15 s cycles).
-- Minimum-detectable-signal sweep using a programmable attenuator.
-- IQ-domain metrics (image rejection, spur survey) captured straight
-  from `radiod` raw output rather than via the status stream.
-
-Each of these is its own plan when its time comes.
-
-## 9. Open items and risks
-
-- **QDX beacon timing accuracy.** Phase 1 assumes the QDX's internal
-  scheduler hits the even-UTC-minute slot tightly enough that the
-  decoder will accept it. To verify during bring-up; if not, add a
-  manual PTT trigger from the host with NTP-disciplined timing.
-- **wsprdaemon spot log location/format.** The grep target in step 5
-  of the script needs confirmation against the actual deployment in
-  `docker/ka9q-radio`. Document the path in the script.
-- **QDX provisioning.** Callsign/grid/power are programmed into the
-  QDX's EEPROM once via its own configuration interface. The
-  harness assumes this is done; the README will call it out.
-- **Container USB passthrough for the eventual runner.** Phase 3
-  needs `--device=/dev/bus/usb/...` (or `--privileged` as a
-  fallback) in the workflow. Confirm udev rules on the runner host
-  so the device nodes are stable across reboots.
-- **Baseline drift.** Open-bench QRM will move the noise floor day
-  to day. Tolerance bands in Phase 2 must be wide enough to absorb
-  this; if Phase 1.5 data shows the variance is too wide for a
-  useful gate, that's the signal to invest in shielding before
-  Phase 3, not after.
-- **Single test band.** Phase 1 picks one band (20 m suggested).
-  Multi-band coverage is a Phase 2/3 extension once the single-band
-  path is trusted.
-
-## 10. What this plan does *not* commit to
-
-- Specific tolerance numbers (Phase 2/3 — empirical).
-- Runner workflow YAML (Phase 3 — written when the runner exists).
-- Container image rebuild strategy for the runner (Phase 3).
-- Any code beyond the Phase 1 script and its CAT helper.
-- A schedule. Phase 1 is days; Phase 1.5 + 2 are weeks of data
-  collection plus small code; Phase 3 is the largest single chunk.
+- **QDX is not a beacon.** Unlike the U3S, the QDX requires a host
+  to generate the WSPR audio — hence the audio path in Phase 1.
+  Callsign/grid/power live in the WAV, not in the radio's EEPROM.
+- **wsprdaemon spot log path/format** — to confirm during
+  bring-up; document the grep target in the script.
+- **Audio-device pinning.** QDX shows up as an ALSA card; pin via
+  udev rule using its USB IDs so device-node enumeration order
+  doesn't matter.
+- **NTP discipline.** WSPR cycles align to even UTC minute; bench
+  host clock must be NTP-synced. Pre-flight enforces.
+- **PTT timing.** Verify on bring-up that PTT-assert → audio-out
+  has no front-end clipping.
+- **Open-bench QRM drift.** Phase 2 tolerance bands must absorb
+  day/night variance. If Phase 1.5 data shows variance is too wide
+  to gate usefully, shielding becomes a prerequisite *before*
+  Phase 3 runner work.
+- **Public-repo + self-hosted runner risk.** Phase 3 requires the
+  fork-PR approval gate, ephemeral runner mode, dedicated runner
+  host on a segmented VLAN, and no personal credentials on the
+  host. The locked-down repo settings tracked separately must
+  precede the runner.
+- **Single test band in Phase 1.** 20 m suggested. Multi-band is a
+  Phase 2/3 extension.
